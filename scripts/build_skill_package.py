@@ -30,6 +30,13 @@ SKILLHUB_FIELD_SOURCES = (
     ("version", "version"),
     ("summary", "summary"),
 )
+WORKBUDDY_FIELD_SOURCES = (
+    ("version", "version"),
+    ("display_name", "displayName"),
+    ("display_name_en", "displayNameEn"),
+    ("description_zh", "summary"),
+    ("description_en", "summaryEn"),
+)
 
 
 def validate_sources() -> None:
@@ -80,13 +87,45 @@ def skillhub_skill_md() -> bytes:
     return transformed.encode("utf-8")
 
 
-def build_zip(output: Path, *, skillhub: bool = False) -> None:
+def workbuddy_skill_md() -> bytes:
+    """Return SKILL.md with WorkBuddy-required fields promoted to the top level.
+
+    WorkBuddy rejects packages whose frontmatter lacks version / display_name /
+    display_name_en / description_zh / description_en as top-level keys; the
+    default (Codex) variant must NOT carry them, so they are injected at pack time.
+    """
+    text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        raise SystemExit("SKILL.md must start with YAML frontmatter")
+
+    promoted = []
+    for field, metadata_field in WORKBUDDY_FIELD_SOURCES:
+        match = re.search(rf"(?m)^  {re.escape(metadata_field)}:[ \t]*(.+)$", text)
+        if not match:
+            raise SystemExit(f"SKILL.md metadata is missing {metadata_field}")
+        promoted.append(f"{field}: {match.group(1).strip()}")
+
+    first_line_end = text.find("\n", len("---\n"))
+    if first_line_end == -1:
+        raise SystemExit("SKILL.md frontmatter is incomplete")
+    transformed = (
+        text[: first_line_end + 1]
+        + "\n".join(promoted)
+        + "\n"
+        + text[first_line_end + 1 :]
+    )
+    return transformed.encode("utf-8")
+
+
+def build_zip(output: Path, *, skillhub: bool = False, workbuddy: bool = False) -> None:
     validate_sources()
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for relative_path in REQUIRED_FILES:
-            if skillhub and relative_path == Path("SKILL.md"):
+            if relative_path == Path("SKILL.md") and skillhub:
                 data = skillhub_skill_md()
+            elif relative_path == Path("SKILL.md") and workbuddy:
+                data = workbuddy_skill_md()
             else:
                 data = (ROOT / relative_path).read_bytes()
             info = zipfile.ZipInfo(relative_path.as_posix(), date_time=(1980, 1, 1, 0, 0, 0))
@@ -106,16 +145,29 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=DEFAULT_OUTPUT,
-        help=f"output ZIP path (default: {DEFAULT_OUTPUT})",
+        default=None,
+        help=f"output ZIP path (default: {DEFAULT_OUTPUT}, or its -workbuddy sibling with --workbuddy)",
     )
     parser.add_argument(
         "--skillhub",
         action="store_true",
         help="promote SkillHub publishing fields in the packaged SKILL.md",
     )
+    parser.add_argument(
+        "--workbuddy",
+        action="store_true",
+        help="promote WorkBuddy-required fields in the packaged SKILL.md",
+    )
     args = parser.parse_args()
-    build_zip(args.output.expanduser().resolve(), skillhub=args.skillhub)
+    output = args.output
+    if output is None:
+        name = "lynse-cli-skill-workbuddy.zip" if args.workbuddy else None
+        output = DEFAULT_OUTPUT if name is None else DEFAULT_OUTPUT.with_name(name)
+    build_zip(
+        output.expanduser().resolve(),
+        skillhub=args.skillhub,
+        workbuddy=args.workbuddy,
+    )
 
 
 if __name__ == "__main__":

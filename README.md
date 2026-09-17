@@ -23,40 +23,18 @@
 
 ### 安装
 
-#### 安装为 Agent Skill（推荐）
-
-把下面这段说明直接发给 Codex、Claude Code、Cursor 或其他支持 Agent Skills 的 Agent：
-
-> 请将“灵光记/lynse-cli”安装为当前 Agent 可发现的全局 Skill，而不是只临时运行 CLI。
->
-> ```bash
-> npx -y skills add lynse-ai/lynse-cli --skill lynse-cli --global
-> ```
->
-> API 服务器地址：`https://api.lynse.cn`。请将 `LYNSE_API_HOST=https://api.lynse.cn` 写入当前 Agent 支持的环境配置或已安装 Skill 的 `.env`；不要在 `.env` 中写入 API Key。
->
-> 请根据当前 Agent 选择它支持的 Skill 目录。安装前确认 Node.js/npm 和 Python 3.11+ 可用；安装后确认 Agent 能发现 `lynse-cli`，并在 Skill 目录运行只读的 `<Python 3.11+> lynse.py version` 验证。需要认证时，请在本机终端启动 `<Python 3.11+> lynse.py auth login --host https://api.lynse.cn`，提示用户只在终端的隐藏输入框中输入 API Key；不要在对话或日志中索取、显示或输出 API Key。
-
-如果当前 Agent 不支持 Skill 或没有 Shell、网络、目录写入权限，应说明缺少的条件，不要绕过权限。
-
-#### 临时运行或全局安装 CLI
-
 ```bash
-# 临时运行 CLI；不会安装 Agent Skill
-npx -y @lynse.ai/lynse-cli@latest --help
+# 推荐使用 npx 一键安装
+npx -y @lynse.ai/lynse-cli@latest
 
-# 全局安装 CLI
+# AI 助手环境添加 skill（OpenClaw 等）
+npx skills add lynse-ai/lynse-cli
+
+# 或全局安装
 npm install -g @lynse.ai/lynse-cli
 
 # Python 项目复用同一 API 客户端
-python3 -m pip install "git+https://github.com/lynse-ai/lynse-cli.git@v1.8.1"
-
-# 或使用安装脚本
-# macOS/Linux
-./install.sh
-
-# Windows PowerShell
-.\install.ps1
+python3 -m pip install "git+https://github.com/lynse-ai/lynse-cli.git@v1.8.0"
 ```
 
 **API 服务器地址**: `https://api.lynse.cn`
@@ -89,8 +67,6 @@ lynse todos list
 
 ## 📖 详细文档
 
-- 📚 [完整使用指南](USAGE.md) - 小白友好的详细教程
-- 🔧 [安装指南](install-guide.md) - 详细安装说明
 - 📋 [命令参考](SKILL.md) - 完整命令列表
 - 🔄 [更新日志](CHANGELOG.md) - 版本更新记录
 - 🔌 [MCP 服务仓库](https://github.com/lynse-ai/lynse-mcp) - 独立的 MCP 服务项目
@@ -136,6 +112,8 @@ lynse todos reschedule <ID> 2026-08-15 # 调整截止时间
 ```bash
 lynse --help                          # 查看帮助
 lynse version                         # 查看版本
+lynse update --check                  # 检查 npm 上的最新版本
+lynse update                          # 自动更新到最新版（含 SKILL.md 与参考文档）
 lynse doctor                         # 系统诊断
 ```
 

@@ -1,4 +1,7 @@
+import json
+import re
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import lynse
@@ -27,8 +30,13 @@ class EmbeddingContractTests(unittest.TestCase):
                 http_client=FakeHttp(),
             )
 
-    def test_version_is_1_8_1(self):
-        self.assertEqual(lynse.CLI_VERSION, "1.8.1")
+    def test_version_matches_package_and_skill_metadata(self):
+        package = json.loads(Path("package.json").read_text(encoding="utf-8"))
+        skill_metadata = re.search(
+            r"(?m)^  version:[ \t]*(.+)$", Path("SKILL.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(lynse.CLI_VERSION, package["version"])
+        self.assertEqual(lynse.CLI_VERSION, skill_metadata.group(1).strip().strip('"'))
 
     def test_constructor_supports_embedded_consumers(self):
         api = self.make_api()

@@ -1,13 +1,10 @@
 {
   "name": "@lynse.ai/lynse-cli",
-  "version": "1.8.1",
+  "version": "1.8.2",
   "description": "灵光记 / Lynse CLI 技能包 - 调用 lynse.ai 后端服务的 API，支持用户管理、文件管理、转写总结、待办整理、设备管理等功能。跨平台支持 Windows/macOS/Linux。",
   "main": "lynse.py",
   "bin": {
-    "lynse": "./bin/lynse.js",
-    "lynse-api": "./api_wrapper.sh",
-    "lynse-install": "./install.sh",
-    "lynse-install-win": "./install.ps1"
+    "lynse": "./bin/lynse.js"
   },
   "scripts": {
     "pack:skill": "python3 scripts/build_skill_package.py",
@@ -44,25 +41,13 @@
   "files": [
     "lynse.py",
     "pyproject.toml",
-    "lynse_cli.py",
     "bin/lynse.js",
     "scripts/build_skill_package.py",
     "requirements.txt",
-    "install.sh",
-    "install.ps1",
-    "api_wrapper.sh",
-    "lynse_unified.sh",
-    "lynse-cli-a/client.sh",
-    "lynse-cli-b/client.sh",
     "README.md",
-    "USAGE.md",
-    "QUICKSTART.md",
     "SKILL.md",
-    "install-guide.md",
-    "reference.md",
     "references/",
-    "CHANGELOG.md",
-    "compatibility.md"
+    "CHANGELOG.md"
   ],
   "engines": {
     "python": ">=3.11"

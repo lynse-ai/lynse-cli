@@ -18,9 +18,11 @@ import base64
 import mimetypes
 import os
 import sys
+import io
 import json
 import re
 import hashlib
+import tarfile
 import warnings
 from pathlib import Path
 import platform
@@ -68,7 +70,13 @@ except ImportError:
 
 
 # CLI 版本
-CLI_VERSION = '1.8.1'
+CLI_VERSION = '1.8.2'
+
+# npm 自更新：包名 / registry / 版本检查节流间隔 / 可自替换的技能文件白名单
+NPM_PACKAGE = '@lynse.ai/lynse-cli'
+NPM_REGISTRY_URL = 'https://registry.npmjs.org'
+UPDATE_CHECK_INTERVAL = 24 * 60 * 60  # 秒；后台检查至多每 24h 联网一次
+UPDATE_SKILL_FILES = ('lynse.py', 'SKILL.md', 'requirements.txt')
 
 # 语义化退出码
 EXIT_SUCCESS = 0
@@ -830,17 +838,35 @@ def _format_text(result: dict, command: str) -> str:
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+def _format_duration(seconds) -> str:
+    """bizDuration（秒）→ mm:ss，与 SKILL.md 输出契约一致；空值显示为空。"""
+    if seconds is None or seconds == '':
+        return ''
+    try:
+        total = int(seconds)
+    except (TypeError, ValueError):
+        return str(seconds)
+    return f'{total // 60}:{total % 60:02d}'
+
+
 def _format_table(result: dict, command: str) -> str:
-    """为列表型结果生成 ASCII 表格。"""
+    """为列表型结果生成 ASCII 表格。列可带第三个元素作为单元格格式化函数。"""
     data = result.get('data') if isinstance(result, dict) else result
+    # 会议列表列与 SKILL.md「Output Contract — Meeting Lists」保持一致：
+    # Duration 取 bizDuration（秒），Folder 取 folderName（null 显示为空）。
+    file_columns = [
+        ('ID', 'id'), ('Name', 'originalFilename'),
+        ('Duration', 'bizDuration', _format_duration), ('Folder', 'folderName'),
+        ('Created', 'createTime'),
+    ]
     list_commands = {
-        'listFilesByTimeRange': [('ID', 'id'), ('Name', 'originalFilename'), ('Created', 'createTime')],
-        'listFilesByMonth': [('ID', 'id'), ('Name', 'originalFilename'), ('Created', 'createTime')],
-        'listFilesByWeek': [('ID', 'id'), ('Name', 'originalFilename'), ('Created', 'createTime')],
-        'listFilesByRange': [('ID', 'id'), ('Name', 'originalFilename'), ('Created', 'createTime')],
-        'listFiles': [('ID', 'id'), ('Name', 'originalFilename'), ('Created', 'createTime')],
-        'listFilesPaged': [('ID', 'id'), ('Name', 'originalFilename'), ('Created', 'createTime')],
-        'searchFiles': [('ID', 'id'), ('Name', 'originalFilename'), ('Created', 'createTime')],
+        'listFilesByTimeRange': file_columns,
+        'listFilesByMonth': file_columns,
+        'listFilesByWeek': file_columns,
+        'listFilesByRange': file_columns,
+        'listFiles': file_columns,
+        'listFilesPaged': file_columns,
+        'searchFiles': file_columns,
         'listFolders': [('ID', 'id'), ('Name', 'folderName')],
         'listTodos': [('Done', 'isCompleted'), ('Content', 'todoContent'), ('Deadline', 'expectedCompleteTime')],
         'getMyDevices': [('ID', 'id'), ('SN', 'serialNumber'), ('Name', 'deviceName')],
@@ -853,6 +879,7 @@ def _format_table(result: dict, command: str) -> str:
         return 'No data.'
     headers = [c[0] for c in columns]
     keys = [c[1] for c in columns]
+    formatters = [c[2] if len(c) > 2 else None for c in columns]
     rows = []
     # 列宽上限：ID 列不截断（下游 summary/transcript/outline/info 需要完整可复制的 ID），
     # 其余列超长时截断并加省略号，避免静默丢失信息。
@@ -865,17 +892,20 @@ def _format_table(result: dict, command: str) -> str:
         row = []
         for j, k in enumerate(keys):
             v = item.get(k, '')
-            if k == 'isCompleted':
+            if formatters[j] is not None:
+                s = formatters[j](v)
+            elif k == 'isCompleted':
                 v = '✓' if v else '○'
+                s = str(v)
             elif k == 'enabled':
                 v = '✓' if v else '✗'
-            else:
                 s = str(v)
-                limit = col_limit.get(j, 40)
-                if limit and len(s) > limit:
-                    s = s[:limit - 3] + '...'
-                v = s
-            row.append(str(v))
+            else:
+                s = '' if v is None else str(v)
+            limit = col_limit.get(j, 40)
+            if limit and len(s) > limit:
+                s = s[:limit - 3] + '...'
+            row.append(s)
         rows.append(row)
     widths = [len(h) for h in headers]
     for row in rows:
@@ -945,6 +975,206 @@ def _write_user_config(config: dict) -> Path:
         if fd >= 0:
             os.close(fd)
     return config_file
+
+
+# ==================== npm 版本监测与自更新 ====================
+
+def _update_state_path() -> Path:
+    """版本检查缓存文件路径（~/.lynse/update-check.json，与凭据 config.json 分开存放）。"""
+    return _get_user_config_dir() / 'update-check.json'
+
+
+def _load_update_state() -> dict:
+    """读取版本检查缓存；损坏或缺失时返回空 dict。"""
+    state_file = _update_state_path()
+    if not state_file.exists():
+        return {}
+    try:
+        with open(state_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_update_state(state: dict) -> None:
+    """写入版本检查缓存；失败时静默（缓存不影响任何功能）。"""
+    try:
+        config_dir = _get_user_config_dir()
+        config_dir.mkdir(parents=True, exist_ok=True)
+        with open(_update_state_path(), 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2)
+    except Exception:
+        pass
+
+
+def _version_tuple(version: str) -> tuple:
+    """把 '1.8.2' / '1.9.0-beta.1' 解析成可比较的数字元组（忽略预发布/构建后缀）。"""
+    core = re.split(r'[-+]', str(version).strip(), maxsplit=1)[0]
+    parts = []
+    for piece in core.split('.'):
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _version_is_newer(candidate: str, current: str) -> bool:
+    """candidate 是否严格大于 current（点分数字位逐段比较，短位补 0）。"""
+    a, b = _version_tuple(candidate), _version_tuple(current)
+    length = max(len(a), len(b))
+    a += (0,) * (length - len(a))
+    b += (0,) * (length - len(b))
+    return a > b
+
+
+def _fetch_npm_release(timeout: float = 10.0) -> dict:
+    """查询 npm registry 上最新发布的 {NPM_PACKAGE} 版本。
+
+    返回 {'version': ..., 'tarball': ...}；网络或响应格式异常抛 LynseAPIError。
+    timeout 同时作用于连接与读取（秒）——不用 (connect, read) 元组，
+    部分 requests 版本在慢速代理下会把 connect 值套用到整个请求上。
+    """
+    registry_url = f"{NPM_REGISTRY_URL}/{NPM_PACKAGE.replace('/', '%2F')}/latest"
+    try:
+        resp = requests.get(registry_url, timeout=timeout, headers={'Accept': 'application/json'})
+        resp.raise_for_status()
+        data = resp.json()
+        release = {
+            'version': str(data['version']),
+            'tarball': str(data['dist']['tarball']),
+        }
+    except requests.RequestException as e:
+        raise LynseAPIError(f"npm registry unreachable: {e}")
+    except (KeyError, TypeError, ValueError) as e:
+        raise LynseAPIError(f"unexpected npm registry response: {e}")
+    if not _version_tuple(release['version']) or not release['tarball'].startswith('https://'):
+        raise LynseAPIError("invalid npm registry response")
+    return release
+
+
+def _check_npm_for_update(force: bool = False, timeout: float = 10.0) -> Optional[dict]:
+    """对比本地与 npm 最新版本。
+
+    返回 {'current', 'latest', 'tarball', 'update_available'}；任何失败返回 None。
+    非强制模式下受 UPDATE_CHECK_INTERVAL 节流：缓存新鲜时直接用缓存，不联网。
+    """
+    state = _load_update_state()
+    if not force and time.time() - float(state.get('last_check') or 0) < UPDATE_CHECK_INTERVAL:
+        release = {'version': state.get('latest_version'), 'tarball': state.get('tarball')}
+    else:
+        try:
+            release = _fetch_npm_release(timeout=timeout)
+        except Exception:
+            return None
+        _save_update_state({
+            'last_check': time.time(),
+            'latest_version': release['version'],
+            'tarball': release['tarball'],
+        })
+    latest = release.get('version')
+    if not latest:
+        return None
+    return {
+        'current': CLI_VERSION,
+        'latest': latest,
+        'tarball': release.get('tarball'),
+        'update_available': _version_is_newer(latest, CLI_VERSION),
+    }
+
+
+def _maybe_print_update_notice() -> None:
+    """业务命令前的后台版本提醒（stderr）。
+
+    节流、联网、写缓存全部静默失败，绝不影响业务命令；
+    设置 LYNSE_NO_UPDATE_CHECK=1 可完全关闭。
+    """
+    if os.environ.get('LYNSE_NO_UPDATE_CHECK', '').strip().lower() in ('1', 'true', 'yes'):
+        return
+    try:
+        info = _check_npm_for_update()
+        if info and info['update_available']:
+            print(
+                f"ℹ lynse-cli v{info['latest']} available (current v{info['current']}). "
+                f"Run: python3 lynse.py update",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass
+
+
+def _extract_skill_files(payload: bytes) -> dict:
+    """从 npm tarball（.tgz）字节中提取允许自更新的技能文件。
+
+    只接受白名单成员（UPDATE_SKILL_FILES 及 references/*.md）；
+    含路径穿越（..）、绝对路径或白名单之外的成员一律忽略，防止 tar 注入。
+    """
+    allow_exact = set(UPDATE_SKILL_FILES)
+    extracted = {}
+    with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            name = member.name
+            if name.startswith('./'):
+                name = name[2:]
+            if not name.startswith('package/'):
+                continue
+            rel = name[len('package/'):]
+            parts = [p for p in rel.split('/') if p not in ('', '.')]
+            if not parts or '..' in parts:
+                continue
+            rel = '/'.join(parts)
+            allowed = rel in allow_exact or (
+                len(parts) == 2 and parts[0] == 'references' and parts[1].endswith('.md')
+            )
+            if not allowed:
+                continue
+            src = tar.extractfile(member)
+            if src is not None:
+                extracted[rel] = src.read()
+    if 'lynse.py' not in extracted:
+        raise LynseAPIError('npm tarball does not contain lynse.py')
+    return extracted
+
+
+def _apply_self_update(release: dict) -> dict:
+    """下载 npm 最新 tarball 并原地替换本技能目录中的白名单文件。
+
+    旧 lynse.py 先备份为 lynse.py.bak，再逐文件临时写入 + os.replace 原子替换。
+    """
+    try:
+        resp = requests.get(release['tarball'], timeout=60)
+        resp.raise_for_status()
+        payload = resp.content
+    except requests.RequestException as e:
+        raise LynseAPIError(f"failed to download update tarball: {e}")
+
+    skill_dir = Path(__file__).resolve().parent
+    files = _extract_skill_files(payload)
+
+    backup_path = skill_dir / 'lynse.py.bak'
+    try:
+        backup_path.write_bytes((skill_dir / 'lynse.py').read_bytes())
+    except Exception:
+        backup_path = None  # 备份失败不阻塞更新（真正的写入问题会在替换时暴露）
+
+    replaced = []
+    for rel, data in sorted(files.items()):
+        target = skill_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + '.tmp-update')
+        tmp.write_bytes(data)
+        os.replace(tmp, target)
+        replaced.append(rel)
+
+    return {
+        'from_version': CLI_VERSION,
+        'to_version': release['version'],
+        'updated_files': replaced,
+        'backup': str(backup_path) if backup_path else None,
+    }
 
 
 def _load_install_env(config_file: Optional[str] = None) -> None:
@@ -2289,7 +2519,7 @@ def _print_help():
         ("System", [
             ("version", "Show version info"),
             ("doctor", "Run diagnostics"),
-            ("update", "Check for updates"),
+            ("update [--check]", "Check npm for a newer version and self-update (--check only reports)"),
         ]),
         ("Output Format", [
             ("--json", "Compact JSON (default when piped)"),
@@ -2479,6 +2709,10 @@ def main():
     command, args, is_alias = _resolve_alias(cli_args[0], cli_args[1:])
     display_command = _ALIAS_INFO.get(command, command)
 
+    # 3.5 后台版本监测：stderr 提醒，可关闭，绝不影响业务命令（update 自带强检查）
+    if command != '__update__':
+        _maybe_print_update_notice()
+
     try:
         # 4. 本地命令（不需要 API 实例）
         if command == '__version__':
@@ -2495,6 +2729,13 @@ def main():
                 'os': f'{_plat.system()} {_plat.release()}',
                 'requests': req_ver,
             }
+            known_latest = _load_update_state().get('latest_version')
+            if known_latest:
+                result['latest npm'] = (
+                    f"v{known_latest} (update available)"
+                    if _version_is_newer(known_latest, CLI_VERSION)
+                    else f"v{known_latest} (up to date)"
+                )
             if flags.get('format') in ('text', None) or flags.get('format') == 'pretty':
                 for k, v in result.items():
                     print(f"{k}: {v}")
@@ -2503,13 +2744,39 @@ def main():
             return
 
         if command == '__update__':
-            result = {
-                'version': f'v{CLI_VERSION}',
-                'message': 'lynse-cli is managed via lynclaw skill updates. Run your package manager (npm/skill installer) to update.',
-            }
+            check_only = '--check' in args
+            info = _check_npm_for_update(force=True, timeout=20.0)
+            if info is None:
+                print("Error: could not reach the npm registry (registry.npmjs.org).", file=sys.stderr)
+                print("Retry later, or update manually: npm install -g @lynse.ai/lynse-cli@latest", file=sys.stderr)
+                sys.exit(EXIT_NETWORK)
+            if not info['update_available']:
+                result = {
+                    'current': info['current'],
+                    'latest': info['latest'],
+                    'update_available': False,
+                    'message': f"lynse-cli v{info['current']} is up to date.",
+                }
+            elif check_only:
+                result = {
+                    **info,
+                    'message': (
+                        f"lynse-cli v{info['latest']} is available (current v{info['current']}). "
+                        f"Re-run without --check to update."
+                    ),
+                }
+            else:
+                result = _apply_self_update(info)
+                result['message'] = (
+                    f"Updated lynse-cli v{result['from_version']} -> v{result['to_version']}. "
+                    f"Restart your assistant session to load the new version."
+                )
             if flags.get('format') in ('text', 'pretty'):
-                print(f"lynse-cli {result['version']}")
                 print(result['message'])
+                for rel in result.get('updated_files', []):
+                    print(f"  updated: {rel}")
+                if result.get('backup'):
+                    print(f"  backup: {result['backup']}")
             else:
                 _format_output(result, command, flags)
             return

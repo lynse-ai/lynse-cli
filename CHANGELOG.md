@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.8.2 (2026-09-17)
+
+### New Features
+
+- Monitor npm for new releases: at most one `registry.npmjs.org` metadata check per 24 h, cached in `~/.lynse/update-check.json`, printing a non-blocking stderr notice when a newer version exists. Disable with `LYNSE_NO_UPDATE_CHECK=1`.
+- Rework `update` into a real self-updater: it queries the npm registry and, by default, downloads the latest tarball and atomically replaces the skill files in place (`lynse.py`, `SKILL.md`, `requirements.txt`, `references/*.md`), backing up the previous `lynse.py`; `update --check` only reports.
+- Add a `--workbuddy` packaging variant that promotes `version` / `display_name` / `display_name_en` / `description_zh` / `description_en` to top-level SKILL.md frontmatter fields (WorkBuddy rejects packages without them); the default Codex variant stays free of those fields.
+
+### Changed
+
+- State the agent interface contract explicitly in `SKILL.md` and reference docs: agents must call `lynse.py` subcommands only — never the raw HTTP API, the npm `lynse` shim, or invented commands/flags.
+- Remove legacy shell wrappers, standalone installers, and early user guides from the repository; the skill bundle is the Python entrypoint plus its reference docs.
+- Replace hardcoded version tests with a cross-file consistency check across `lynse.py`, `package.json`, and `SKILL.md`.
+- Extend the `--table` output for meeting lists (`meetings list/month/week/range/all/search`) with the two columns required by the SKILL.md output contract: `Duration` renders `bizDuration` seconds as `mm:ss` (empty while a recording is still processing) and `Folder` renders `folderName` as-is (empty when the meeting is uncategorized).
+
 ## 1.8.1 (2026-08-21)
 
 ### Security

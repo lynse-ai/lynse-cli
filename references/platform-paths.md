@@ -1,9 +1,9 @@
 # Platform Paths (AI Assistant Environments)
 
 The skill runs the same way in every AI assistant; only the install directory differs. Registry
-installs place the minimal skill bundle directly into that directory. The standalone npm project
-has separate end-user installers, but an agent must not run an installer from inside this skill.
-Python 3.11 or newer is required in every environment.
+installs place the minimal skill bundle directly into that directory. The standalone npm package
+ships the same skill files plus a `lynse` shim for end-user shells, but an agent must call the
+Python entrypoint directly. Python 3.11 or newer is required in every environment.
 
 ## Skill Install Directories
 
@@ -37,5 +37,7 @@ The other difference across environments is **how env vars reach the process**:
 ## Cross-Platform Execution Rules
 
 1. Use `python3` on macOS/Linux, `python` (or `py -3`) on Windows. Never assume one name works everywhere.
-2. Never use shell scripts (`lynse_unified.sh`, `api_wrapper.sh`) in instructions — they don't work on Windows.
-3. On Windows, call `python lynse.py ...` or `py -3 lynse.py ...` directly from the skill directory. For npm installs, the `lynse` command is provided by `bin/lynse.js`, and npm creates the Windows `.cmd` shim automatically.
+2. Never wrap commands in shell scripts — they don't run on Windows. Call `lynse.py` directly.
+3. The `lynse` npm shim, `npx`, and npm installers are end-user tools; an agent must never invoke them. Always call the Python entrypoint instead.
+4. Never call the Lynse HTTP API directly (`curl` / `fetch` / requests against `$LYNSE_API_HOST`) — `lynse.py` subcommands are the only supported interface.
+5. On Windows, call `python lynse.py ...` or `py -3 lynse.py ...` directly from the skill directory. For npm installs, the `lynse` command is provided by `bin/lynse.js`, and npm creates the Windows `.cmd` shim automatically.

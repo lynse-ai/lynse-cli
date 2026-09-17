@@ -1,5 +1,9 @@
 # Auth & Security
 
+> **Agent note**: the endpoints below are implemented internally by `lynse.py` and documented
+> for troubleshooting only. Always invoke the CLI (`python3 lynse.py <command>`) — never call
+> these endpoints directly with `curl`, `fetch`, or any other HTTP client.
+
 ## Two-Layer Auth
 
 Lynse uses **API Key + temporary Token**:
