@@ -64,15 +64,16 @@ jobs:
         run: |
           PACKAGE_SPEC=$(node -p "require('./package.json').name + '@' + require('./package.json').version")
           EXPECTED_VERSION=$(node -p "require('./package.json').version")
-          for attempt in 1 2 3 4 5 6; do
+          # npm 提示新版本"几分钟内生效"，30 秒窗口曾误报失败（v1.8.2），放宽到 5 分钟
+          for attempt in $(seq 1 30); do
             PUBLISHED_VERSION=$(npm view "$PACKAGE_SPEC" version 2>/dev/null || true)
             if [ "$PUBLISHED_VERSION" = "$EXPECTED_VERSION" ]; then
               echo "Verified $PACKAGE_SPEC"
               exit 0
             fi
-            if [ "$attempt" -lt 6 ]; then
-              sleep 5
+            if [ "$attempt" -lt 30 ]; then
+              sleep 10
             fi
           done
-          echo "npm registry did not return $PACKAGE_SPEC after 30 seconds" >&2
+          echo "npm registry did not return $PACKAGE_SPEC after 5 minutes" >&2
           exit 1
