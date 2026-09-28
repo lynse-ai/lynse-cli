@@ -29,6 +29,7 @@ Header: X-API-Key: $LYNSE_API_KEY
 2. Environment variables (`LYNSE_API_KEY`, `LYNSE_API_HOST`)
 3. User config (`~/.lynse/config.json`)
 4. Install `.env` file (lowest precedence, backward compatible)
+5. Public production host default (`https://api.lynse.cn`); there is no default API key
 
 A stale install `.env` key **never** overrides the key saved via `auth login`
 (user config) or an explicit shell export. Prefer `auth login` — no key is
@@ -38,7 +39,8 @@ hardcoded or shipped.
 
 ```
 User calls lynse.py
-  → Check LYNSE_API_HOST / LYNSE_API_KEY
+  → Use the official host or resolve a configured HTTPS custom host
+  → Resolve LYNSE_API_KEY
     → Not found → Check ~/.lynse/config.json
       → Not found → Check .env
         → Not found → Prompt user to configure
@@ -71,7 +73,10 @@ transient — they do **not** mean your key is wrong.
 - If `LYNSE_OWNER_ID` is set, verify current user matches; if not, reply: "Access denied: this is a private account."
 
 ### Auth security
-- Token auto-refreshes on failure; if refresh fails, prompt user to check API Key
+- Cached tokens refresh when expired; HTTP 401 reads refresh and retry once when an API Key is available. Writes are never resubmitted automatically.
+- `auth logout` removes the local token and saved API key; it does not revoke credentials on the server. `--tokens-only` keeps the key, so the token can be renewed. Remove environment or install `.env` credentials at their source.
+- When `LYNSE_OWNER_ID` is set, verify the account ID before business requests; reject mismatches and unverifiable identities.
+- Custom API hosts must be HTTPS origins.
 - User config file must have 600 permissions (owner read/write only)
 - Token cache file must have 600 permissions (owner read/write only)
 

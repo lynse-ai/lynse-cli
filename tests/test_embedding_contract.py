@@ -121,6 +121,7 @@ class EmbeddingContractTests(unittest.TestCase):
                 "fileIds": "file-1,file-2",
             },
         )
+        self.assertFalse(calls[1][2]["_retry_safe"])
 
     def test_delete_folders_allows_server_count_zero(self):
         api = self.make_api()
@@ -292,7 +293,8 @@ class EmbeddingContractTests(unittest.TestCase):
                 (
                     "GET",
                     "/api/business/device/unbind",
-                    {"params": {"macAddress": "AA:BB:CC:DD:EE:FF"}},
+                    {"params": {"macAddress": "AA:BB:CC:DD:EE:FF"},
+                     "_retry_safe": False},
                 ),
             ],
         )

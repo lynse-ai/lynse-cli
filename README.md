@@ -34,10 +34,10 @@ npx skills add lynse-ai/lynse-cli
 npm install -g @lynse.ai/lynse-cli
 
 # Python 项目复用同一 API 客户端
-python3 -m pip install "git+https://github.com/lynse-ai/lynse-cli.git@v1.8.0"
+python3 -m pip install "git+https://github.com/lynse-ai/lynse-cli.git@v1.8.3"
 ```
 
-**API 服务器地址**: `https://api.lynse.cn`
+**正式 API 地址**: `https://api.lynse.cn`（默认使用；自定义地址须为 HTTPS）
 
 ### 配置
 
@@ -78,6 +78,7 @@ lynse todos list
 lynse meetings list --days 7          # 最近7天会议
 lynse meetings month 2026-04           # 指定月份会议
 lynse meetings search 关键词          # 搜索会议
+lynse meetings search 关键词 --from 2026-04-01 --to 2026-04-30
 ```
 
 ### 2. AI 智能功能
@@ -85,7 +86,9 @@ lynse meetings search 关键词          # 搜索会议
 lynse meetings summary <ID>            # 获取第一篇 AI 总结（--all 获取全部）
 lynse meetings outline <ID>           # 获取会议大纲
 lynse meetings transcript <ID>        # 获取完整转写
+lynse meetings transcript <ID> -o transcript.txt # 保存带时间戳的文本
 lynse meetings audio <ID>             # 获取音频下载信息
+lynse meetings summary <ID> -o summary.md # 保存 Markdown 正文
 ```
 
 ### 3. 自动整理

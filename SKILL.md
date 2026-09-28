@@ -18,13 +18,12 @@ metadata:
   skillhubSlug: lynse
   displayName: 灵光记Lynse
   displayNameEn: Lynse CLI
-  version: 1.8.2
+  version: 1.8.3
   summary: 通过 Lynse / 灵光记 skill 可以非常方便地查询和调用灵光记上所有的音频文件、会议纪要和转写记录，所有用户数据都可以自己掌控。
   summaryEn: Easily query and access every audio file, meeting minute, and transcription on Lynse — all user data stays under your own control.
   openclaw:
     requires:
       env:
-        - LYNSE_API_HOST
         - LYNSE_API_KEY
       bins:
         - python
@@ -88,7 +87,7 @@ python3 lynse.py meetings list [--days 7]              # Recent meetings (past N
 python3 lynse.py meetings month <YYYY-MM>              # Meetings in a specific month
 python3 lynse.py meetings week <YYYY-Wnn>              # Meetings in a specific ISO week
 python3 lynse.py meetings range <start> <end>          # Meetings in a date range (YYYY-MM-DD)
-python3 lynse.py meetings search <keyword>             # Search by title
+python3 lynse.py meetings search <keyword> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--page N] [--size N]  # Search by title/date
 python3 lynse.py meetings transcript <id>              # Get transcription
 python3 lynse.py meetings transcript-text <id>         # Get transcription text
 python3 lynse.py meetings audio <id>                   # Get audio download metadata
@@ -109,6 +108,8 @@ python3 lynse.py devices list                          # List bound devices
 python3 lynse.py devices info <id>                     # Device details
 python3 lynse.py devices unbind <id>                   # Unbind device
 ```
+
+Search date filtering scans the paginated title matches and then applies the date range locally. It may take longer for broad searches.
 
 **Date query flexibility** (`meetings month`/`week`):
 ```
@@ -134,13 +135,15 @@ Classifies meetings (with a summary) into topic folders by title, **reusing exis
 
 ### Auth & System
 
-First-time setup: no key is hardcoded — each user inputs their own, saved locally to `~/.lynse/config.json`.
+First-time setup: no key is hardcoded — each user inputs their own, saved locally to `~/.lynse/config.json`. The public production API host defaults to `https://api.lynse.cn`; custom hosts must be HTTPS origins.
 
 ```
 python3 lynse.py auth login                    # Interactive prompt for your API key (recommended)
-python3 lynse.py auth login --api-key <key> [--host <url>]   # Or pass the key explicitly
+python3 lynse.py auth login --api-key <key> [--host <url>]   # Or pass the key explicitly (visible in process arguments)
+LYNSE_API_KEY=dk_xxx python3 lynse.py auth login             # Non-interactive alternative
 python3 lynse.py auth status                                  # Show auth config
-python3 lynse.py auth logout [--all]                          # Clear tokens (--all also clears API key)
+python3 lynse.py auth logout                                  # Remove local token and saved API key
+python3 lynse.py auth logout --tokens-only                    # Clear token cache only; key can renew it
 python3 lynse.py auth doctor                                  # Diagnose auth issues
 python3 lynse.py version    # Version, Python, OS, requests info
 python3 lynse.py doctor     # Full environment diagnostics
@@ -151,10 +154,10 @@ python3 lynse.py update [--check]   # Check npm for a newer version and self-upd
 
 ```
 --json             Compact JSON (default when piped)
---pretty           Pretty-printed JSON (default in terminal)
---text             Human-readable text summary
+--pretty           Pretty-printed JSON
+--text             Human-readable output (default in terminal)
 --table            ASCII table for list results
---output <file>    Save output to file
+-o, --output <file> Save output to file; summary/transcript use text unless JSON is explicit
 ```
 
 Combine: `python3 lynse.py meetings list --table --output meetings.txt`
@@ -190,9 +193,9 @@ Sort by `recordStartTime` ascending. Append summary line: `Total: N meetings, HH
 - **Interface contract**: the `lynse.py` subcommands are the only supported calling surface. Raw
   HTTP requests to `$LYNSE_API_HOST` (curl / fetch / requests), the npm `lynse` shim, and
   undocumented commands or flags are all out of contract and must not be used.
-- **Base URL**: all API requests use `$LYNSE_API_HOST`. Never hardcode or guess the server address.
+- **Base URL**: the public production default is `https://api.lynse.cn`. `$LYNSE_API_HOST` or an explicit `--host` overrides it; accept a custom host only from the user or administrator and require HTTPS.
 - **Network disclosure**: commands send only the requested Lynse operation data and authentication
-  headers to the user-configured `$LYNSE_API_HOST`. The skill has no analytics or telemetry
+  headers to the resolved API host. The skill has no analytics or telemetry
   endpoint. The only other host contacted is the npm registry (`registry.npmjs.org`): a version
   metadata check at most once every 24 h (cached in `~/.lynse/update-check.json`) and, when
   `update` runs, the official package tarball. No user or meeting data is ever sent to npm.

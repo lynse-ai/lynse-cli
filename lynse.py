@@ -70,7 +70,8 @@ except ImportError:
 
 
 # CLI 版本
-CLI_VERSION = '1.8.2'
+CLI_VERSION = '1.8.3'
+DEFAULT_API_HOST = 'https://api.lynse.cn'
 
 # npm 自更新：包名 / registry / 版本检查节流间隔 / 可自替换的技能文件白名单
 NPM_PACKAGE = '@lynse.ai/lynse-cli'
@@ -93,7 +94,10 @@ def _resolve_exit_code(error: 'LynseAPIError') -> int:
     http = error.http_code
     code = error.code
     msg = (error.message or '').lower()
-    if http in (401,) or code in (401, 2000) or 'token' in msg and ('过期' in msg or 'invalid' in msg or 'expired' in msg or 'failed' in msg):
+    if (http in (401,) or code in (401, 2000) or
+            'lynse_api_key is not configured' in msg or
+            'api key is required' in msg or
+            ('token' in msg and ('过期' in msg or 'invalid' in msg or 'expired' in msg or 'failed' in msg))):
         return EXIT_AUTH
     if http in (403,) or code in (403,) or '权限不足' in msg or 'permission' in msg or 'insufficient' in msg:
         return EXIT_PERMISSION
@@ -268,16 +272,23 @@ def _parse_organize_args(args: list) -> dict:
 
 
 def _extract_page_kwargs(args: list) -> dict:
-    """从参数中提取 --page 和 --size。"""
+    """Parse the supported meeting search options without silently dropping typos."""
     kwargs = {}
     i = 0
     while i < len(args):
-        if args[i] == '--page' and i + 1 < len(args):
-            kwargs['page'] = int(args[i + 1]); i += 2
-        elif args[i] == '--size' and i + 1 < len(args):
-            kwargs['page_size'] = int(args[i + 1]); i += 2
+        if args[i] in ('--page', '--size', '--from', '--to') and i + 1 < len(args):
+            key = {'--page': 'page', '--size': 'page_size',
+                   '--from': 'from_date', '--to': 'to_date'}[args[i]]
+            kwargs[key] = args[i + 1]
+            i += 2
         else:
-            i += 1
+            raise LynseAPIError(f"Unknown or incomplete search option: {args[i]}")
+    for key in ('page', 'page_size'):
+        if key in kwargs:
+            try:
+                kwargs[key] = int(kwargs[key])
+            except ValueError:
+                raise LynseAPIError(f"{key} must be an integer")
     return kwargs
 
 
@@ -313,6 +324,30 @@ def _transcription_entries_to_text(data) -> str:
         speaker_text = f"{speaker}: {text}" if speaker else text
         lines.append(f"{prefix} {speaker_text}" if prefix else speaker_text)
     return '\n'.join(lines)
+
+
+def _summary_content(value) -> str:
+    """Return summary prose instead of a Python representation of the API object."""
+    if value is None:
+        return 'No summary available.'
+    if isinstance(value, dict):
+        for key in ('content', 'conclusion', 'summary', 'markdown'):
+            content = value.get(key)
+            if isinstance(content, str) and content.strip():
+                return content
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    return str(value)
+
+
+def _result_items(data) -> list:
+    """Accept both list and paginated-list API response shapes."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ('records', 'list', 'rows', 'items'):
+            if isinstance(data.get(key), list):
+                return data[key]
+    return []
 
 
 def _format_transcription_timestamp(entry: dict) -> str:
@@ -422,26 +457,29 @@ def _resolve_alias(command: str, args: list):
 
 def _parse_global_flags(args: list):
     """从参数列表中提取并剥离全局标志。返回 (flags, remaining_args)。"""
-    flags = {'format': None, 'output_file': None}
+    flags = {'format': None, 'format_explicit': False, 'output_file': None}
     remaining = []
     i = 0
     while i < len(args):
         if args[i] == '--json':
-            flags['format'] = 'json'; i += 1
+            flags['format'] = 'json'; flags['format_explicit'] = True; i += 1
         elif args[i] == '--pretty':
-            flags['format'] = 'pretty'; i += 1
+            flags['format'] = 'pretty'; flags['format_explicit'] = True; i += 1
         elif args[i] == '--text':
-            flags['format'] = 'text'; i += 1
+            flags['format'] = 'text'; flags['format_explicit'] = True; i += 1
         elif args[i] == '--table':
-            flags['format'] = 'table'; i += 1
-        elif args[i] == '--output' and i + 1 < len(args):
+            flags['format'] = 'table'; flags['format_explicit'] = True; i += 1
+        elif args[i] in ('--output', '-o') and i + 1 < len(args):
             flags['output_file'] = args[i + 1]; i += 2
         elif args[i].startswith('--output='):
             flags['output_file'] = args[i].split('=', 1)[1]; i += 1
+        elif args[i] in ('--output', '-o'):
+            print('Error: --output requires a file path.', file=sys.stderr)
+            sys.exit(EXIT_INVALID)
         else:
             remaining.append(args[i]); i += 1
     if flags['format'] is None:
-        flags['format'] = 'pretty' if hasattr(sys.stdout, 'isatty') and sys.stdout.isatty() else 'json'
+        flags['format'] = 'text' if hasattr(sys.stdout, 'isatty') and sys.stdout.isatty() else 'json'
     return flags, remaining
 
 
@@ -763,10 +801,18 @@ def _format_text(result: dict, command: str) -> str:
         return _format_organize_text(result)
     if command in ('listFilesByTimeRange', 'listFilesByMonth', 'listFilesByWeek',
                    'listFilesByRange', 'listFiles', 'listFilesPaged', 'searchFiles'):
-        items = data if isinstance(data, list) else []
+        items = _result_items(data)
         if not items:
             return 'No files found.'
-        lines = [f'Total: {len(items)} file(s)']
+        total = result.get('total') if isinstance(result, dict) else None
+        if total is None and isinstance(data, dict):
+            total = data.get('total')
+        try:
+            total = int(total) if total is not None else len(items)
+        except (TypeError, ValueError):
+            total = len(items)
+        lines = [f'Showing {len(items)} of {total} file(s)' if total > len(items)
+                 else f'Total: {len(items)} file(s)']
         for item in items[:20]:
             if isinstance(item, dict):
                 name = item.get('originalFilename') or item.get('name') or item.get('id', '?')
@@ -777,18 +823,10 @@ def _format_text(result: dict, command: str) -> str:
         return '\n'.join(lines)
     if command == 'getConclusion':
         if isinstance(data, list):
-            return '\n\n'.join(str(c.get('content', c)) if isinstance(c, dict) else str(c) for c in data)
-        return str(data)
+            return '\n\n'.join(_summary_content(c) for c in data)
+        return _summary_content(data)
     if command == 'getTranscriptionRecord':
-        if isinstance(data, list):
-            lines = []
-            for entry in data:
-                if isinstance(entry, dict):
-                    speaker = entry.get('speakerName') or f"Speaker {entry.get('speakerId', '?')}"
-                    text = entry.get('text', '')
-                    lines.append(f'{speaker}: {text}')
-            return '\n'.join(lines) if lines else str(data)
-        return str(data)
+        return _transcription_entries_to_text(data)
     if command == 'getTranscriptionText':
         return str(data or '')
     if command == 'getOutline':
@@ -874,7 +912,7 @@ def _format_table(result: dict, command: str) -> str:
     if command not in list_commands:
         return _format_text(result, command)
     columns = list_commands[command]
-    items = data if isinstance(data, list) else []
+    items = _result_items(data)
     if not items:
         return 'No data.'
     headers = [c[0] for c in columns]
@@ -934,9 +972,17 @@ def _format_output(result, command: str, flags: dict) -> None:
     else:
         text = json.dumps(result, ensure_ascii=False, separators=(',', ':'))
     if output_file:
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write(text)
-            f.write('\n')
+        fd = os.open(output_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            if os.name != 'nt':
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                fd = -1
+                f.write(text)
+                f.write('\n')
+        finally:
+            if fd >= 0:
+                os.close(fd)
         print(f"Output saved to: {output_file}", file=sys.stderr)
     else:
         print(text)
@@ -954,7 +1000,8 @@ def _load_user_config() -> dict:
         return {}
     try:
         with open(config_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            config = json.load(f)
+            return config if isinstance(config, dict) else {}
     except Exception:
         return {}
 
@@ -1244,9 +1291,24 @@ def _resolve_api_credentials(
     elif ucfg.get('api_host'):
         host = ucfg.get('api_host')
     else:
-        host = env_host
+        host = env_host or DEFAULT_API_HOST
 
     return host, key, key_source
+
+
+def _validate_api_host(host: str) -> str:
+    """Reject hosts that could disclose API credentials or change the API path."""
+    host = str(host or '').strip().rstrip('/')
+    try:
+        parsed = urlsplit(host)
+        parsed.port  # Reject malformed and out-of-range ports.
+    except ValueError as e:
+        raise LynseAPIError('API host must be a valid HTTPS origin.') from e
+    if (any(char.isspace() for char in host) or parsed.scheme != 'https' or
+            not parsed.hostname or parsed.username or
+            parsed.password or parsed.path or parsed.query or parsed.fragment):
+        raise LynseAPIError('API host must be an HTTPS origin (for example https://api.lynse.cn).')
+    return host
 
 
 class LynseAPIError(Exception):
@@ -1263,7 +1325,7 @@ class LynseAPI:
 
     # HTTP 错误码处理映射
     HTTP_ERROR_MESSAGES = {
-        401: "Token expired, refreshing automatically...",
+        401: "Token expired. Reauthenticate or retry the command.",
         403: "Insufficient permissions. Contact your administrator to upgrade.",
         404: "The requested resource was not found.",
         429: "Rate limit exceeded. Please wait 60 seconds and try again.",
@@ -1297,18 +1359,15 @@ class LynseAPI:
             install_env_path=config_file,
             user_config=self._user_config,
         )
+        self.api_host = _validate_api_host(self.api_host)
         self.owner_id = owner_id or os.environ.get('LYNSE_OWNER_ID')
+        self._owner_verified_token = None
         self._forced_access_token = (access_token or "").strip()
         if self._forced_access_token and api_key is None:
             # Request-scoped tokens must not inherit and transmit a saved user API key.
             self.api_key = ""
 
         # 3. 验证配置
-        if not self.api_host:
-            raise LynseAPIError(
-                "LYNSE_API_HOST is not configured.\n"
-                "Run 'lynse auth login --api-key <key> --host <url>' or set it in .env"
-            )
         if not self.api_key:
             if not self._forced_access_token and not os.environ.get("LYNSE_ACCESS_TOKEN", "").strip():
                 raise LynseAPIError(
@@ -1422,11 +1481,16 @@ class LynseAPI:
         """保存 Token 到缓存文件"""
         try:
             self.token_file.parent.mkdir(parents=True, exist_ok=True)
-            self.token_file.write_text(token, encoding='utf-8')
-
-            # 设置文件权限为 600（仅所有者可读写）
-            if os.name != 'nt':
-                self.token_file.chmod(0o600)
+            fd = os.open(self.token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                if os.name != 'nt':
+                    os.fchmod(fd, 0o600)
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    fd = -1
+                    f.write(token)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
         except Exception as e:
             print(f"Warning: failed to save token: {e}", file=sys.stderr)
 
@@ -1548,28 +1612,36 @@ class LynseAPI:
             error_msg += f" - {response_text}"
         raise LynseAPIError(error_msg, http_code=http_code)
 
-    def _check_owner_id(self, token: str):
-        """验证 Owner ID"""
-        if not self.owner_id:
-            return
-
+    def _check_owner_id(self, token: str, *, refreshed: bool = False) -> str:
+        """Fail closed when the configured account boundary cannot be verified."""
+        owner_id = getattr(self, 'owner_id', None)
+        if not owner_id or getattr(self, '_owner_verified_token', None) == token:
+            return token
         try:
             url = f"{self.api_host}/api/business/customer/current"
             headers = self._build_auth_headers(token)
             response = getattr(self, "_http", requests).get(
                 url, headers=headers, timeout=10
             )
-            if response.status_code == 200:
-                data = response.json()
-                data_payload = data.get('data') if isinstance(data, dict) else None
-                data_payload = data_payload if isinstance(data_payload, dict) else {}
-                current_id = data_payload.get('id') or data.get('id')
-                if current_id and current_id != self.owner_id:
-                    raise LynseAPIError("Access denied: this is a private account.")
+            if response.status_code == 401 and self.api_key and not refreshed:
+                return self._check_owner_id(self._get_token(refresh=True), refreshed=True)
+            if response.status_code != 200:
+                raise LynseAPIError('Unable to verify account owner.', http_code=response.status_code)
+            data = response.json()
+            if not isinstance(data, dict) or data.get('code') not in (None, 200):
+                raise LynseAPIError('Unable to verify account owner.')
+            payload = data.get('data')
+            current_id = payload.get('id') if isinstance(payload, dict) else None
+            if current_id is None or str(current_id) != str(owner_id):
+                raise LynseAPIError('Access denied: this is a private account.', http_code=403)
+            self._owner_verified_token = token
+            return token
         except LynseAPIError:
             raise
-        except Exception:
-            pass  # 忽略验证错误，继续执行
+        except requests.RequestException as e:
+            raise LynseAPIError(f'Network error while verifying account owner: {e}') from e
+        except (ValueError, TypeError, AttributeError) as e:
+            raise LynseAPIError('Unable to verify account owner.') from e
 
     def _sanitize_param(self, param: str, allow_type: str = 'safe') -> str:
         """清理参数，防止注入"""
@@ -1585,7 +1657,9 @@ class LynseAPI:
                  params: Dict[str, Any] = None,
                  json_data: Dict[str, Any] = None,
                  retry_count: int = 0,
-                 _force_auth_mode: Optional[bool] = None) -> Dict[str, Any]:
+                 _force_auth_mode: Optional[bool] = None,
+                 _auth_retried: bool = False,
+                 _retry_safe: Optional[bool] = None) -> Dict[str, Any]:
         """
         发送 API 请求
 
@@ -1601,9 +1675,11 @@ class LynseAPI:
             解析后的 JSON 响应
         """
         url = f"{self.api_host}{path}"
+        if _retry_safe is None:
+            _retry_safe = method.upper() in ('GET', 'HEAD')
 
         # 获取 Token
-        token = self._get_token()
+        token = self._check_owner_id(self._get_token())
 
         # 构建请求头（HTTP 注入的 accessToken 默认带 Bearer 前缀）
         if _force_auth_mode is None:
@@ -1624,14 +1700,25 @@ class LynseAPI:
                 timeout=30
             )
 
+            if (_retry_safe and response.status_code == 401 and
+                    self.api_key and not _auth_retried):
+                self._get_token(refresh=True)
+                return self._request(
+                    method, path, headers=headers, params=params, json_data=json_data,
+                    retry_count=retry_count, _force_auth_mode=_force_auth_mode,
+                    _auth_retried=True, _retry_safe=_retry_safe,
+                )
+
             # Retry transient server errors (429 / 5xx) so a momentary server
             # hiccup doesn't fail the whole request.
-            if response.status_code in (429, 500, 502, 503, 504) and retry_count < 2:
+            if (_retry_safe and response.status_code in (429, 500, 502, 503, 504)
+                    and retry_count < 2):
                 time.sleep(0.5 * (retry_count + 1))
                 return self._request(
                     method, path, headers=headers, params=params,
                     json_data=json_data, retry_count=retry_count + 1,
-                    _force_auth_mode=_force_auth_mode,
+                    _force_auth_mode=_force_auth_mode, _auth_retried=_auth_retried,
+                    _retry_safe=_retry_safe,
                 )
 
             # 检查 HTTP 错误
@@ -1648,7 +1735,7 @@ class LynseAPI:
             if code and code != 200:
                 message = data.get('message') or data.get('msg') or data.get('raw') or 'unknown error'
                 # Bearer / 裸 JWT 不一致时自动切换一次（兼容不同 Lynse 网关约定）
-                if retry_count == 0 and code in (2000, 401, 403):
+                if _retry_safe and retry_count == 0 and code in (2000, 401, 403):
                     use_bearer_now = self._should_use_bearer_authorization(token)
                     alt_headers = self._build_auth_headers_with_mode(
                         token,
@@ -1664,6 +1751,8 @@ class LynseAPI:
                             json_data=json_data,
                             retry_count=retry_count + 1,
                             _force_auth_mode=not use_bearer_now,
+                            _auth_retried=_auth_retried,
+                            _retry_safe=_retry_safe,
                         )
                 raise LynseAPIError(f"API error: {message}", code=code)
 
@@ -1672,9 +1761,13 @@ class LynseAPI:
         except LynseAPIError:
             raise
         except requests.RequestException as e:
-            if retry_count < 2:
+            if _retry_safe and retry_count < 2:
                 # 网络错误，重试
-                return self._request(method, path, headers, params, json_data, retry_count + 1)
+                return self._request(
+                    method, path, headers=headers, params=params, json_data=json_data,
+                    retry_count=retry_count + 1, _force_auth_mode=_force_auth_mode,
+                    _auth_retried=_auth_retried, _retry_safe=_retry_safe,
+                )
             raise LynseAPIError(f"网络错误：{e}")
 
     # ==================== 认证辅助 ====================
@@ -1729,7 +1822,8 @@ class LynseAPI:
 
     def refresh_membership(self) -> Dict[str, Any]:
         """刷新并获取当前会员等级与额度"""
-        return self._request('GET', '/api/business/customer/membership/refresh')
+        return self._request('GET', '/api/business/customer/membership/refresh',
+                             _retry_safe=False)
 
     # 文件管理
     def list_files(self) -> Dict[str, Any]:
@@ -1798,22 +1892,80 @@ class LynseAPI:
             'data': all_items,
         }
 
-    def search_files(self, keyword: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
-        """按标题关键词搜索文件。"""
+    def search_files(self, keyword: str, page: int = 1, page_size: int = 20,
+                     from_date: str = None, to_date: str = None) -> Dict[str, Any]:
+        """Search titles, optionally filtering the paginated results by recording date."""
         safe_keyword = self._sanitize_param(keyword, 'safe').strip()
         if not safe_keyword:
             return {'code': 200, 'msg': 'SUCCESS', 'total': 0, 'data': []}
-        safe_page = self._sanitize_param(str(page), 'digit') or '1'
-        safe_page_size = self._sanitize_param(str(page_size), 'digit') or '20'
-        return self._request(
-            'GET',
-            '/api/business/file/page',
-            params={
-                'originalFilename': safe_keyword,
-                'pageNum': int(safe_page),
-                'pageSize': int(safe_page_size),
-            },
-        )
+        if not 1 <= page <= 1000 or not 1 <= page_size <= 100:
+            raise LynseAPIError('Search page must be 1-1000 and size must be 1-100.')
+        for date in (from_date, to_date):
+            if date:
+                try:
+                    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date):
+                        raise ValueError(date)
+                    datetime.strptime(date, '%Y-%m-%d')
+                except ValueError as e:
+                    raise LynseAPIError('Search dates must use YYYY-MM-DD.') from e
+        if from_date and to_date and from_date > to_date:
+            raise LynseAPIError('--from must not be after --to.')
+
+        def fetch(search_page: int, size: int) -> Dict[str, Any]:
+            return self._request(
+                'GET', '/api/business/file/page',
+                params={'originalFilename': safe_keyword,
+                        'pageNum': search_page, 'pageSize': size},
+            )
+
+        if not (from_date or to_date):
+            return fetch(page, page_size)
+
+        matches = []
+        seen_ids = set()
+        scanned = 0
+        for search_page in range(1, 1001):
+            response = fetch(search_page, 100)
+            payload = response.get('data') if isinstance(response, dict) else None
+            items = payload if isinstance(payload, list) else None
+            if isinstance(payload, dict):
+                items = next((payload[key] for key in ('records', 'list', 'rows', 'items')
+                              if isinstance(payload.get(key), list)), None)
+            if items is None:
+                raise LynseAPIError('Search response has an unexpected format.')
+            scanned += len(items)
+            raw_total = response.get('total') if isinstance(response, dict) else None
+            if raw_total is None and isinstance(payload, dict):
+                raw_total = payload.get('total')
+            try:
+                server_total = int(raw_total) if raw_total is not None else None
+            except (TypeError, ValueError):
+                server_total = None
+            new_items = 0
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_id = str(item.get('id') or '')
+                if item_id and item_id in seen_ids:
+                    continue
+                if item_id:
+                    seen_ids.add(item_id)
+                new_items += 1
+                raw_date = item.get('recordStartTime') or item.get('createTime')
+                item_date = str(raw_date or '')[:10]
+                if len(item_date) != 10:
+                    continue
+                if (not from_date or item_date >= from_date) and (not to_date or item_date <= to_date):
+                    matches.append(item)
+            if new_items == 0 or not items or (server_total is not None and scanned >= server_total):
+                break
+            if server_total is None and len(items) < 100:
+                break
+        else:
+            raise LynseAPIError('Search exceeded 1000 pages; narrow the date range.')
+        start = (page - 1) * page_size
+        return {'code': 200, 'msg': 'SUCCESS', 'total': len(matches),
+                'data': matches[start:start + page_size]}
 
     def get_file_info(self, file_id: str) -> Dict[str, Any]:
         """获取文件详情"""
@@ -1926,7 +2078,8 @@ class LynseAPI:
 
     def list_all_todos(self) -> Dict[str, Any]:
         """获取全量文件待办列表。"""
-        return self._request('POST', '/api/business/file/todo/listall', json_data={})
+        return self._request('POST', '/api/business/file/todo/listall', json_data={},
+                             _retry_safe=True)
 
     def delete_todos(self, todo_ids: list[str]) -> Dict[str, Any]:
         """删除待办。"""
@@ -2062,7 +2215,8 @@ class LynseAPI:
             'newFolderId': payload.get('newFolderId') or '',
             'fileIds': ','.join(str(file_id) for file_id in file_ids if file_id),
         }
-        return self._request('GET', '/api/business/file/changeFolder', params=params)
+        return self._request('GET', '/api/business/file/changeFolder', params=params,
+                             _retry_safe=False)
 
     def delete_folders(self, folder_ids: List[str]) -> Dict[str, Any]:
         """Delete folders only after the service confirms that every target is empty."""
@@ -2415,6 +2569,7 @@ class LynseAPI:
             'GET',
             '/api/business/device/unbind',
             params={'macAddress': safe_mac},
+            _retry_safe=False,
         )
 
     # 用户管理
@@ -2483,7 +2638,7 @@ def _print_help():
             ("meetings month <YYYY-MM>", "List meetings in a specific month"),
             ("meetings week <YYYY-Wnn>", "List meetings in a specific ISO week"),
             ("meetings range <start> <end>", "List meetings in a date range (YYYY-MM-DD)"),
-            ("meetings search <keyword>", "Search meetings by title"),
+            ("meetings search <keyword> [filters]", "Search titles; --from/--to YYYY-MM-DD, --page/--size N"),
             ("meetings transcript <id>", "Get meeting transcription"),
             ("meetings transcript-text <id>", "Get meeting transcription text"),
             ("meetings audio <id>", "Get meeting audio download metadata"),
@@ -2513,7 +2668,7 @@ def _print_help():
         ("Auth", [
             ("auth login [--host <url>]", "Prompt securely for API key and validate"),
             ("auth status", "Show auth configuration"),
-            ("auth logout [--all]", "Clear cached tokens"),
+            ("auth logout [--tokens-only]", "Remove local credentials (or only clear the token cache)"),
             ("auth doctor", "Diagnose auth issues"),
         ]),
         ("System", [
@@ -2523,10 +2678,10 @@ def _print_help():
         ]),
         ("Output Format", [
             ("--json", "Compact JSON (default when piped)"),
-            ("--pretty", "Pretty JSON (default in terminal)"),
-            ("--text", "Human-readable summary"),
+            ("--pretty", "Pretty JSON"),
+            ("--text", "Human-readable output (default in terminal)"),
             ("--table", "ASCII table for lists"),
-            ("--output <file>", "Save output to file"),
+            ("-o, --output <file>", "Save output to file (recording text for summaries/transcripts)"),
         ]),
         ("Exit Codes", [
             ("0", "Success"),
@@ -2556,7 +2711,9 @@ def _handle_auth_command(subcommand: str, args: list, flags: dict):
             elif args[i] == '--host' and i + 1 < len(args):
                 api_host = args[i + 1]; i += 2
             else:
-                i += 1
+                raise LynseAPIError(f'Unknown or incomplete login option: {args[i]}')
+        if not api_key:
+            api_key = (os.environ.get('LYNSE_API_KEY') or '').strip()
         if not api_key:
             # Let the user input their own key interactively (terminal only).
             # In non-interactive / agent contexts (no TTY) we never hardcode or
@@ -2574,7 +2731,7 @@ def _handle_auth_command(subcommand: str, args: list, flags: dict):
                 print(
                     "Error: API key is required.\n"
                     "  Interactive terminal:  lynse auth login\n"
-                    "  Or pass it explicitly: lynse auth login --api-key dk_xxx\n"
+                    "  Or set LYNSE_API_KEY in the environment.\n"
                     "Get your key from the system console.",
                     file=sys.stderr,
                 )
@@ -2589,16 +2746,16 @@ def _handle_auth_command(subcommand: str, args: list, flags: dict):
                 pass
         if api_key:
             config['api_key'] = api_key
+        config.pop('access_token', None)
         if api_host:
             config['api_host'] = api_host
         try:
             api = LynseAPI(api_key=api_key, api_host=api_host)
             token = api.auth_login(api_key, api_host)
-            config['access_token'] = token
+            token = api._check_owner_id(token)
             config_file = _write_user_config(config)
-            token_file = config_dir / 'tokens.json'
-            api._save_token(token)
-            result = {'status': 'ok', 'message': 'API key validated and saved', 'token_cached': True,
+            result = {'status': 'ok', 'message': 'API key validated and saved',
+                      'token_cached': api._get_cached_token() == token,
                       'config_path': str(config_file), 'token_path': str(api.token_file)}
             _format_output(result, 'auth_login', flags)
         except LynseAPIError as e:
@@ -2609,7 +2766,7 @@ def _handle_auth_command(subcommand: str, args: list, flags: dict):
     if subcommand == '__auth_status__':
         ucfg = _load_user_config()
         host, key, key_source = _resolve_api_credentials(user_config=ucfg)
-        masked_key = f"{key[:6]}...{key[-4:]}" if key and len(key) > 10 else ('(not set)' if not key else key)
+        masked_key = f"{key[:6]}...{key[-4:]}" if key and len(key) > 10 else ('(set)' if key else '(not set)')
         token_file = _get_user_config_dir() / 'tokens.json'
         legacy_token = Path(__file__).parent.resolve() / '.token_cache'
         actual_token = token_file if token_file.exists() else (legacy_token if legacy_token.exists() else None)
@@ -2625,24 +2782,27 @@ def _handle_auth_command(subcommand: str, args: list, flags: dict):
         return
 
     if subcommand == '__auth_logout__':
-        clear_all = '--all' in args
+        unknown = set(args) - {'--all', '--tokens-only'}
+        if unknown or ('--all' in args and '--tokens-only' in args):
+            raise LynseAPIError('Usage: auth logout [--tokens-only]')
+        tokens_only = '--tokens-only' in args
         removed = []
         for tf in [_get_user_config_dir() / 'tokens.json', Path(__file__).parent.resolve() / '.token_cache']:
             if tf.exists():
                 tf.unlink(); removed.append(str(tf))
-        if clear_all:
-            cf = _get_user_config_dir() / 'config.json'
-            if cf.exists():
-                config = {}
-                try:
-                    with open(cf, 'r', encoding='utf-8') as f:
-                        config = json.load(f)
-                except Exception:
-                    pass
-                config.pop('api_key', None); config.pop('access_token', None)
+        cf = _get_user_config_dir() / 'config.json'
+        if cf.exists():
+            config = _load_user_config()
+            had_secret = 'access_token' in config or (not tokens_only and 'api_key' in config)
+            config.pop('access_token', None)
+            if not tokens_only:
+                config.pop('api_key', None)
+            if had_secret:
                 _write_user_config(config)
                 removed.append(str(cf))
-        result = {'status': 'ok', 'removed': removed} if removed else {'status': 'ok', 'message': 'No cached tokens found'}
+        result = {'status': 'ok', 'removed': removed,
+                  'message': ('Token cache cleared; the saved API key can renew it.' if tokens_only
+                              else 'Local credentials cleared. Unset LYNSE_API_KEY or remove an install .env key if configured. No server-side revocation was performed.')}
         _format_output(result, 'auth_logout', flags)
         return
 
@@ -2708,6 +2868,9 @@ def main():
     # 3. 解析命令与别名
     command, args, is_alias = _resolve_alias(cli_args[0], cli_args[1:])
     display_command = _ALIAS_INFO.get(command, command)
+    if (flags['output_file'] and not flags['format_explicit'] and
+            command in ('getConclusion', 'getTranscriptionRecord', 'getTranscriptionText')):
+        flags['format'] = 'text'
 
     # 3.5 后台版本监测：stderr 提醒，可关闭，绝不影响业务命令（update 自带强检查）
     if command != '__update__':
@@ -2797,8 +2960,7 @@ def main():
             except ImportError:
                 _check('requests installed', False, "run: pip install requests")
             ucfg = _load_user_config()
-            host = os.environ.get('LYNSE_API_HOST') or ucfg.get('api_host') or ''
-            key = os.environ.get('LYNSE_API_KEY') or ucfg.get('api_key') or ''
+            host, key, _ = _resolve_api_credentials(user_config=ucfg)
             _check('API host configured', bool(host), host[:40] if host else 'not set')
             _check('API key configured', bool(key), 'configured' if key else 'not set')
             if host:

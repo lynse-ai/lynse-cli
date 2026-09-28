@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.8.3 (2026-09-28)
+
+### Fixed
+
+- Complete first-time API-key login using the public production `https://api.lynse.cn` HTTPS API host and report the actual token-cache state.
+- Return the authentication exit code when a missing API key blocks a command after local logout.
+- Enforce optional account-owner checks before business requests, denying mismatched or unverifiable accounts.
+- Avoid automatic retries for writes, including folder moves and device unbinding exposed as GET requests.
+
+### Changed
+
+- Make local logout remove the saved API key by default; `--tokens-only` retains it and `--all` remains an alias for full local logout. Server-side revocation is not available through this command.
+- Display readable summaries and timestamped transcripts in terminals, and save their text directly with `-o` / `--output`; protect output files with owner-only permissions on Unix.
+- Add date filters to paginated title search and refresh expired tokens once for safe reads.
+
 ## 1.8.2 (2026-09-17)
 
 ### New Features
