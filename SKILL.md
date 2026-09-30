@@ -18,7 +18,7 @@ metadata:
   skillhubSlug: lynse
   displayName: 灵光记Lynse
   displayNameEn: Lynse CLI
-  version: 1.8.3
+  version: 1.8.4
   summary: 通过 Lynse / 灵光记 skill 可以非常方便地查询和调用灵光记上所有的音频文件、会议纪要和转写记录，所有用户数据都可以自己掌控。
   summaryEn: Easily query and access every audio file, meeting minute, and transcription on Lynse — all user data stays under your own control.
   openclaw:
@@ -101,13 +101,19 @@ python3 lynse.py folders move <json>                   # Move files to folder
 python3 lynse.py folders count                         # Count files by folder
 python3 lynse.py folders delete <ids>                  # Delete server-verified empty folders only
 python3 lynse.py todos list [all|open|done]            # List todos
+python3 lynse.py todos add <content> [--file ID] [--deadline 'YYYY-MM-DD HH:MM:SS'] [--weight N] [--owner NAME] [--sync 0|1]  # Insert todo(s); repeat --content or pass a JSON array for batch (max 100)
+python3 lynse.py todos count                           # Deadline statistics: week/month/later/no-date/expired
+python3 lynse.py todos range [start] [end] [--status 0|1] [--page N] [--size N]  # Query todos by expected completion time
+python3 lynse.py todos offline                         # Full todo download (includes sync markers)
 python3 lynse.py todos delete <ids>                    # Delete todos
 python3 lynse.py todos clear                           # Clear completed todos
-python3 lynse.py todos reschedule <id> <deadline>      # Change todo deadline
+python3 lynse.py todos reschedule <id> <deadline>      # Change todo deadline; pass a JSON array to batch-update content/status/owner/time
 python3 lynse.py devices list                          # List bound devices
 python3 lynse.py devices info <id>                     # Device details
 python3 lynse.py devices unbind <id>                   # Unbind device
 ```
+
+Todo deadlines use `YYYY-MM-DD HH:MM:SS`; `todos range` also accepts date-only bounds (the end bound is exclusive and expands to the next day 00:00:00). `todos add` inherits the cloud-sync marker of the linked file server-side when `--file` is given; `--sync 0` marks a todo offline-only.
 
 Search date filtering scans the paginated title matches and then applies the date range locally. It may take longer for broad searches.
 

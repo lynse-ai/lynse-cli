@@ -1,6 +1,6 @@
 {
   "name": "@lynse.ai/lynse-cli",
-  "version": "1.8.3",
+  "version": "1.8.4",
   "description": "灵光记 / Lynse CLI 技能包 - 调用 lynse.ai 后端服务的 API，支持用户管理、文件管理、转写总结、待办整理、设备管理等功能。跨平台支持 Windows/macOS/Linux。",
   "main": "lynse.py",
   "bin": {

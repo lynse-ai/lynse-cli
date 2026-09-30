@@ -70,7 +70,7 @@ except ImportError:
 
 
 # CLI 版本
-CLI_VERSION = '1.8.3'
+CLI_VERSION = '1.8.4'
 DEFAULT_API_HOST = 'https://api.lynse.cn'
 
 # npm 自更新：包名 / registry / 版本检查节流间隔 / 可自替换的技能文件白名单

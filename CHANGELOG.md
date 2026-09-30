@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.8.4 (2026-09-30)
+
+### New Features
+
+- Add Todo insert (`todos add`, POST `/api/business/file/todo/insert`): batch 1–100 items with optional `fileId` (existence and ownership verified server-side), `expectedCompleteTime` (`yyyy-MM-dd HH:mm:ss`), `displayWeight`, `owner`, and `syncStatus` (1 cloud-sync default / 0 offline); sync inheritance from the linked file stays server-side. Repeat `--content` or pass a JSON array for batches; the request is transactional.
+- Add Todo deadline statistics (`todos count`, GET `/api/business/file/todo/count`): near-week / near-month / over-month / no-date / expired buckets (cloud-sync todos only).
+- Add time-range Todo query (`todos range`, POST `/api/business/file/todo/list`): optional `isCompleted` filter (`--status 0|1`), optional pagination (`--page`/`--size`), cloud-sync todos only. Date-only bounds expand to full days and the end bound is exclusive.
+- Add full Todo download (`todos offline`, POST `/api/business/file/todo/offline/list`): returns every todo including offline ones with sync markers, for client-side reconciliation.
+- Extend `todos reschedule` (now also aliased as `todos update`) into the batch update API (POST `/api/business/file/todo/update`): besides the single `<id> <deadline>` form it accepts a JSON array of update items with `todoContent`, `displayWeight`, `isCompleted` (0/1), `expectedCompleteTime` (explicit `null` clears the field), and `owner`; duplicate ids and invalid values fail fast client-side.
+
+### Changed
+
+- Todo time fields are validated client-side against `yyyy-MM-dd HH:mm:ss` so malformed deadlines fail with a clear message instead of a server-side JSON parse error.
+
 ## 1.8.3 (2026-09-28)
 
 ### Fixed
