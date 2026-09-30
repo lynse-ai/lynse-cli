@@ -76,7 +76,7 @@ class EmbeddingContractTests(unittest.TestCase):
             (method, path, kwargs)
         ) or {"code": 200}
 
-        api.reschedule_todo("todo-1", "2026-08-14")
+        api.reschedule_todo("todo-1", "2026-08-14 09:30:00")
         api.delete_todos(["todo-1", "todo-2"])
         api.clear_completed_todos()
 
@@ -87,7 +87,7 @@ class EmbeddingContractTests(unittest.TestCase):
                 "todoUpdateList": [
                     {
                         "todoId": "todo-1",
-                        "expectedCompleteTime": "2026-08-14",
+                        "expectedCompleteTime": "2026-08-14 09:30:00",
                     }
                 ]
             },

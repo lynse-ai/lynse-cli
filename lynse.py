@@ -148,9 +148,14 @@ _SUBCOMMAND_ALIASES = {
     },
     'todos': {
         'list': 'listTodos',
+        'add': 'insertTodos',
+        'count': 'countTodos',
+        'range': 'listTodosByRange',
+        'offline': 'listOfflineTodos',
         'clear': 'clearCompletedTodos',
         'delete': 'deleteTodos',
         'reschedule': 'rescheduleTodo',
+        'update': 'rescheduleTodo',
     },
     'devices': {
         'list': 'getMyDevices',
@@ -186,10 +191,13 @@ _ALIAS_HANDLERS = {
     'countByCategory': lambda api, a: api.count_files_by_folder(),
     'deleteFolders': lambda api, a: _handle_delete_folders(api, a),
     'listTodos': lambda api, a: api.list_todos(status=(a[0] if a else 'all'), page_num=int(a[1]) if len(a) > 1 else 1, page_size=int(a[2]) if len(a) > 2 else 20),
+    'insertTodos': lambda api, a: _handle_insert_todos(api, a),
+    'countTodos': lambda api, a: api.count_todos(),
+    'listTodosByRange': lambda api, a: _handle_todos_range(api, a),
+    'listOfflineTodos': lambda api, a: api.list_offline_todos(),
     'clearCompletedTodos': lambda api, a: api.clear_completed_todos(),
     'deleteTodos': lambda api, a: _handle_delete_todos(api, a),
-    'rescheduleTodo': lambda api, a: api.reschedule_todo(a[0], a[1])
-    if len(a) >= 2 else _missing_arg('todo ID and new deadline'),
+    'rescheduleTodo': lambda api, a: _handle_reschedule_todo(api, a),
     'getMyDevices': lambda api, a: api.get_my_devices(),
     'getDeviceInfo': lambda api, a: api.get_device_info(a[0]) if a else _missing_arg('device ID'),
     'unbindDevice': lambda api, a: api.unbind_device(a[0]) if a else _missing_arg('device ID'),
@@ -215,6 +223,10 @@ _ALIAS_INFO = {
     'countByCategory': 'folders count',
     'deleteFolders': 'folders delete',
     'listTodos': 'todos list',
+    'insertTodos': 'todos add',
+    'countTodos': 'todos count',
+    'listTodosByRange': 'todos range',
+    'listOfflineTodos': 'todos offline',
     'clearCompletedTodos': 'todos clear',
     'deleteTodos': 'todos delete',
     'rescheduleTodo': 'todos reschedule',
@@ -403,6 +415,186 @@ def _handle_delete_folders(api, args: list):
     except json.JSONDecodeError:
         folder_ids = [item.strip() for item in raw_ids.split(',') if item.strip()]
     return api.delete_folders([str(item) for item in folder_ids])
+
+
+# ==================== Todo helpers（todo/insert、todo/list、todo/update） ====================
+
+_TODO_TIME_FORMAT = '%Y-%m-%d %H:%M:%S'
+_TODO_INSERT_MAX = 100
+
+
+def _validate_todo_time(value: str, field: str) -> str:
+    """校验待办时间必须为 yyyy-MM-dd HH:mm:ss，返回原字符串。"""
+    try:
+        datetime.strptime(value, _TODO_TIME_FORMAT)
+    except ValueError:
+        raise LynseAPIError(f"{field} must use the format yyyy-MM-dd HH:mm:ss, got '{value}'")
+    return value
+
+
+def _parse_todo_datetime(text, *, end_of_day: bool = False) -> str:
+    """接受 YYYY-MM-DD 或完整时间戳；日期型按需补足边界。
+
+    end_of_day=True（endTime 为开区间）时补到次日 0 点，覆盖整天。
+    """
+    value = str(text or '').strip()
+    if not value:
+        raise LynseAPIError('Missing todo query date.')
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+        try:
+            day = datetime.strptime(value, '%Y-%m-%d')
+        except ValueError:
+            raise LynseAPIError(f"Invalid todo date '{value}'. Use YYYY-MM-DD or yyyy-MM-dd HH:mm:ss.")
+        if end_of_day:
+            return (day + timedelta(days=1)).strftime('%Y-%m-%d') + ' 00:00:00'
+        return value + ' 00:00:00'
+    return _validate_todo_time(value, 'todo date')
+
+
+def _todo_int_field(item: dict, key: str, cleaned: dict, allowed=None) -> None:
+    """取可选整数字段并校验（allowed 为合法值集合）。"""
+    value = item.get(key)
+    if value in (None, ''):
+        return
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise LynseAPIError(f'{key} must be an integer, got {value!r}')
+    if allowed is not None and number not in allowed:
+        allowed_text = ' or '.join(str(a) for a in allowed)
+        raise LynseAPIError(f'{key} must be {allowed_text}, got {number}')
+    cleaned[key] = number
+
+
+def _build_todo_insert_item(item) -> dict:
+    """规范化单条待办插入项（POST /todo/insert 的 todoInsertList 元素）。"""
+    if isinstance(item, str):
+        item = {'todoContent': item}
+    if not isinstance(item, dict):
+        raise LynseAPIError('Each todo item must be an object or a content string.')
+    cleaned: Dict[str, Any] = {}
+    content = str(item.get('todoContent') or item.get('content') or '').strip()
+    if not content:
+        raise LynseAPIError('todoContent不能为空')
+    cleaned['todoContent'] = content
+    file_id = str(item.get('fileId') or '').strip()
+    if file_id:
+        cleaned['fileId'] = file_id
+    deadline = item.get('expectedCompleteTime')
+    if deadline not in (None, ''):
+        cleaned['expectedCompleteTime'] = _validate_todo_time(str(deadline).strip(), 'expectedCompleteTime')
+    _todo_int_field(item, 'displayWeight', cleaned)
+    owner = item.get('owner')
+    if owner not in (None, ''):
+        cleaned['owner'] = str(owner)
+    _todo_int_field(item, 'syncStatus', cleaned, allowed=(0, 1))
+    return cleaned
+
+
+def _build_todo_update_item(item) -> dict:
+    """规范化单条待办更新项（POST /todo/update 的 todoUpdateList 元素）。"""
+    if not isinstance(item, dict):
+        raise LynseAPIError('Each todo update item must be an object with a todoId.')
+    cleaned: Dict[str, Any] = {}
+    todo_id = str(item.get('todoId') or '').strip()
+    if not todo_id:
+        raise LynseAPIError('todoId is required for every todo update item.')
+    cleaned['todoId'] = todo_id
+    content = item.get('todoContent')
+    if content is not None and str(content).strip():
+        cleaned['todoContent'] = str(content).strip()
+    # 键存在即下发：值为 null/'' 表示显式清除，非空则校验格式；键缺失=不改
+    if 'expectedCompleteTime' in item:
+        deadline = item.get('expectedCompleteTime')
+        if deadline in (None, ''):
+            cleaned['expectedCompleteTime'] = None
+        else:
+            cleaned['expectedCompleteTime'] = _validate_todo_time(str(deadline).strip(), 'expectedCompleteTime')
+    _todo_int_field(item, 'displayWeight', cleaned)
+    _todo_int_field(item, 'isCompleted', cleaned, allowed=(0, 1))
+    owner = item.get('owner')
+    if owner is not None and str(owner).strip():
+        cleaned['owner'] = str(owner).strip()
+    return cleaned
+
+
+def _handle_insert_todos(api, args: list):
+    """处理 todos add：JSON 批量数组，或单条内容 + 可选标志（--content 可重复）。"""
+    if not args:
+        _missing_arg('todo content, --content <text>, or a JSON array of todo items')
+    raw = " ".join(args).strip()
+    if raw.startswith('['):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            return api.insert_todos(parsed)
+    items = []
+    options: Dict[str, Any] = {}
+    positional = []
+    flag_map = {'--file': 'fileId', '--deadline': 'expectedCompleteTime',
+                '--weight': 'displayWeight', '--owner': 'owner', '--sync': 'syncStatus'}
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == '--content' and i + 1 < len(args):
+            items.append({'todoContent': args[i + 1]}); i += 2
+        elif arg in flag_map and i + 1 < len(args):
+            options[flag_map[arg]] = args[i + 1]; i += 2
+        elif arg.startswith('--'):
+            print("Error: unknown or incomplete option. Usage: todos add <content> "
+                  "[--file ID] [--deadline 'YYYY-MM-DD HH:MM:SS'] [--weight N] [--owner NAME] "
+                  "[--sync 0|1]; repeat --content <text> for multiple todos, or pass a JSON array",
+                  file=sys.stderr)
+            sys.exit(EXIT_INVALID)
+        else:
+            positional.append(arg); i += 1
+    if positional:
+        items.insert(0, {'todoContent': ' '.join(positional)})
+    if not items:
+        _missing_arg('todo content')
+    return api.insert_todos([{**options, **item} for item in items])
+
+
+def _handle_todos_range(api, args: list):
+    """处理 todos range：[start] [end] + --status 0|1 --page N --size N。"""
+    options: Dict[str, Any] = {}
+    positional = []
+    flag_map = {'--status': 'is_completed', '--page': 'page_num', '--size': 'page_size'}
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in flag_map and i + 1 < len(args):
+            options[flag_map[arg]] = args[i + 1]; i += 2
+        elif arg.startswith('--'):
+            print("Error: unknown or incomplete option. Usage: todos range [start] [end] "
+                  "[--status 0|1] [--page N] [--size N] (dates: YYYY-MM-DD or "
+                  "'YYYY-MM-DD HH:MM:SS')", file=sys.stderr)
+            sys.exit(EXIT_INVALID)
+        else:
+            positional.append(arg); i += 1
+    if len(positional) > 2:
+        print("Error: todos range accepts at most two dates (start end).", file=sys.stderr)
+        sys.exit(EXIT_INVALID)
+    start_time = _parse_todo_datetime(positional[0]) if len(positional) >= 1 else None
+    end_time = _parse_todo_datetime(positional[1], end_of_day=True) if len(positional) >= 2 else None
+    return api.list_todos_by_range(start_time=start_time, end_time=end_time, **options)
+
+
+def _handle_reschedule_todo(api, args: list):
+    """处理 todos reschedule/update：JSON 批量数组，或 <todoId> <deadline>。"""
+    if not args:
+        _missing_arg('<todo ID> <deadline>, or a JSON array of update items')
+    if len(args) == 1:
+        try:
+            parsed = json.loads(args[0])
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            return api.reschedule_todo(parsed)
+        _missing_arg('<todo ID> <deadline> (or a JSON array of update items)')
+    return api.reschedule_todo(args[0], args[1])
 
 
 def _parse_month_args(args: list):
@@ -849,7 +1041,7 @@ def _format_text(result: dict, command: str) -> str:
             if isinstance(item, dict):
                 lines.append(f'  [{item.get("id", "?")}] {item.get("folderName") or item.get("name") or "?"}')
         return '\n'.join(lines)
-    if command == 'listTodos':
+    if command in ('listTodos', 'listTodosByRange', 'listOfflineTodos'):
         items = data if isinstance(data, list) else []
         if not items:
             return 'No todos found.'
@@ -860,6 +1052,14 @@ def _format_text(result: dict, command: str) -> str:
                 content = item.get('todoContent', '')
                 lines.append(f'  {done} {content}')
         return '\n'.join(lines)
+    if command == 'countTodos':
+        d = data if isinstance(data, dict) else {}
+        labels = [('nearWeekCount', 'Due this week'), ('nearMonthCount', 'Due this month'),
+                  ('overMonthCount', 'Due later'), ('noDateCount', 'No deadline'),
+                  ('expiredCount', 'Expired')]
+        return '\n'.join(f'{label}: {d.get(key, 0)}' for key, label in labels)
+    if command == 'insertTodos':
+        return 'Todos inserted.' if data else json.dumps(result, ensure_ascii=False)
     if command == 'getMyDevices':
         items = data if isinstance(data, list) else []
         if not items:
@@ -907,6 +1107,13 @@ def _format_table(result: dict, command: str) -> str:
         'searchFiles': file_columns,
         'listFolders': [('ID', 'id'), ('Name', 'folderName')],
         'listTodos': [('Done', 'isCompleted'), ('Content', 'todoContent'), ('Deadline', 'expectedCompleteTime')],
+        # 范围查询/离线全量下发携带 owner 与同步标记，多出两列便于比对
+        'listTodosByRange': [('Done', 'isCompleted'), ('Content', 'todoContent'),
+                             ('Deadline', 'expectedCompleteTime'), ('Owner', 'owner'),
+                             ('Sync', 'syncStatus')],
+        'listOfflineTodos': [('Done', 'isCompleted'), ('Content', 'todoContent'),
+                             ('Deadline', 'expectedCompleteTime'), ('Owner', 'owner'),
+                             ('Sync', 'syncStatus')],
         'getMyDevices': [('ID', 'id'), ('SN', 'serialNumber'), ('Name', 'deviceName')],
     }
     if command not in list_commands:
@@ -2095,21 +2302,115 @@ class LynseAPI:
         """清理已完成待办。"""
         return self._request('POST', '/api/business/file/todo/clear', json_data={})
 
-    def reschedule_todo(self, todo_id: str, new_deadline: str) -> Dict[str, Any]:
-        """Update the expected completion time for one todo."""
-        safe_id = self._sanitize_param(str(todo_id or "").strip(), 'safe')
-        new_deadline = str(new_deadline or "").strip()
-        if not safe_id:
+    def insert_todos(self, items) -> Dict[str, Any]:
+        """批量插入待办（1~100 条，服务端事务原子）。
+
+        items 元素可为 dict（todoContent 必填，可带 fileId / expectedCompleteTime /
+        displayWeight / owner / syncStatus）或纯内容字符串。syncStatus 不传时由
+        服务端按 fileId 继承规则落库。
+        """
+        if isinstance(items, dict):
+            items = [items]
+        clean_items = [_build_todo_insert_item(item) for item in (items or [])]
+        if not clean_items:
+            raise LynseAPIError('todoInsertList不能为空：至少需要一条待办。')
+        if len(clean_items) > 100:
+            raise LynseAPIError('todoInsertList单次最多100条。')
+        for item in clean_items:
+            if 'fileId' in item:
+                item['fileId'] = self._sanitize_param(item['fileId'], 'safe')
+        return self._request('POST', '/api/business/file/todo/insert',
+                             json_data={'todoInsertList': clean_items})
+
+    def count_todos(self) -> Dict[str, Any]:
+        """待办五桶统计（仅云同步待办）：近一周/近一月/超一月/无截止/已过期。"""
+        return self._request('GET', '/api/business/file/todo/count')
+
+    def list_todos_by_range(self, is_completed=None, start_time=None, end_time=None,
+                            page_num=None, page_size=None) -> Dict[str, Any]:
+        """按预期完成时间范围查询待办（仅云同步待办，可选分页）。"""
+        body: Dict[str, Any] = {}
+        if is_completed is not None and is_completed != '':
+            try:
+                completed = int(is_completed)
+            except (TypeError, ValueError):
+                raise LynseAPIError(f'isCompleted must be 0 or 1, got {is_completed!r}')
+            if completed not in (0, 1):
+                raise LynseAPIError(f'isCompleted must be 0 or 1, got {completed}')
+            body['isCompleted'] = completed
+        if start_time:
+            body['startTime'] = _parse_todo_datetime(start_time)
+        if end_time:
+            body['endTime'] = _parse_todo_datetime(end_time, end_of_day=True)
+        if page_num not in (None, ''):
+            body['pageNum'] = max(1, int(page_num))
+        if page_size not in (None, ''):
+            body['pageSize'] = max(1, min(int(page_size), 100))
+        return self._request('POST', '/api/business/file/todo/list', json_data=body,
+                             _retry_safe=True)
+
+    def list_offline_todos(self) -> Dict[str, Any]:
+        """全量下发待办列表（不过滤云同步标记，携带 syncStatus/deleteSource 等）。"""
+        return self._request('POST', '/api/business/file/todo/offline/list', json_data={},
+                             _retry_safe=True)
+
+    def update_todos(self, updates) -> Dict[str, Any]:
+        """按 todoId 批量更新待办（列表内 todoId 不可重复）。
+
+        元素字段：todoId 必填；todoContent / displayWeight / isCompleted /
+        expectedCompleteTime（显式 null 清除该字段）/ owner 可选，不传不改。
+        """
+        if isinstance(updates, dict):
+            updates = [updates]
+        clean_items = [_build_todo_update_item(item) for item in (updates or [])]
+        if not clean_items:
+            raise LynseAPIError('todoUpdateList不能为空。')
+        for item in clean_items:
+            item['todoId'] = self._sanitize_param(item['todoId'], 'safe')
+        ids = [item['todoId'] for item in clean_items]
+        duplicates = sorted({todo_id for todo_id in ids if ids.count(todo_id) > 1})
+        if duplicates:
+            raise LynseAPIError('todoUpdateList contains duplicate todoId(s): '
+                                + ', '.join(duplicates))
+        return self._request('POST', '/api/business/file/todo/update',
+                             json_data={'todoUpdateList': clean_items})
+
+    def reschedule_todo(self, todo_id, new_deadline=None, content=None,
+                        display_weight=None, is_completed=None, owner=None) -> Dict[str, Any]:
+        """更新待办（POST /todo/update）。
+
+        兼容单条改期：reschedule_todo(todo_id, new_deadline)。
+        也支持整批更新：reschedule_todo([{todoId, ...}, ...])，元素字段同 update_todos。
+        """
+        if isinstance(todo_id, (list, tuple)):
+            return self.update_todos(list(todo_id))
+        item: Dict[str, Any] = {'todoId': str(todo_id or '').strip()}
+        if not item['todoId']:
             raise LynseAPIError('Missing todoId; cannot reschedule the todo.')
-        body = {
-            "todoUpdateList": [
-                {
-                    "todoId": safe_id,
-                    "expectedCompleteTime": new_deadline,
-                }
-            ]
-        }
-        return self._request('POST', '/api/business/file/todo/update', json_data=body)
+        if new_deadline is not None:
+            if str(new_deadline).strip() == '':
+                item['expectedCompleteTime'] = None  # 显式传 null 清除该字段
+            else:
+                item['expectedCompleteTime'] = _validate_todo_time(
+                    str(new_deadline).strip(), 'expectedCompleteTime')
+        if content is not None and str(content).strip():
+            item['todoContent'] = str(content).strip()
+        if display_weight is not None:
+            try:
+                item['displayWeight'] = int(display_weight)
+            except (TypeError, ValueError):
+                raise LynseAPIError(f'displayWeight must be an integer, got {display_weight!r}')
+        if is_completed is not None and is_completed != '':
+            try:
+                completed = int(is_completed)
+            except (TypeError, ValueError):
+                raise LynseAPIError(f'isCompleted must be 0 or 1, got {is_completed!r}')
+            if completed not in (0, 1):
+                raise LynseAPIError(f'isCompleted must be 0 or 1, got {completed}')
+            item['isCompleted'] = completed
+        if owner is not None and str(owner).strip():
+            item['owner'] = str(owner).strip()
+        return self.update_todos([item])
 
     def get_outline(self, file_id: str) -> Dict[str, Any]:
         """获取文件大纲"""
@@ -2656,9 +2957,13 @@ def _print_help():
         ]),
         ("Todos", [
             ("todos list [status] [page] [size]", "List todos (all/open/done)"),
+            ("todos add <content> [flags]", "Insert todo(s): --file/--deadline/--weight/--owner/--sync, repeat --content, or pass a JSON array (max 100)"),
+            ("todos count", "Deadline statistics (week/month/later/no-date/expired)"),
+            ("todos range [start] [end] [--status 0|1]", "Query todos by expected completion time (--page/--size optional)"),
+            ("todos offline", "Full todo download including sync markers"),
             ("todos delete <ids>", "Delete todos"),
             ("todos clear", "Clear completed todos"),
-            ("todos reschedule <id> <deadline>", "Change a todo deadline"),
+            ("todos reschedule <id> <deadline>", "Change a todo deadline (or pass a JSON array to batch-update fields)"),
         ]),
         ("Devices", [
             ("devices list", "List bound devices"),
