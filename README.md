@@ -174,6 +174,24 @@ lynse update                          # 自动更新到最新版（含 SKILL.md 
 lynse doctor                         # 系统诊断
 ```
 
+## 发布到 npm（维护者）
+
+GitHub Actions 使用 npm trusted publishing，通过 GitHub OIDC 发布，工作流不需要 `NPM_TOKEN`。
+在 npm 包 `@lynse.ai/lynse-cli` 的设置中添加 GitHub Actions trusted publisher：
+
+- Organization or user：`lynse-ai`
+- Repository：`lynse-cli`
+- Workflow filename：`npm-publish.yml`
+- Environment name：留空
+- 发布权限：允许 `npm publish`
+
+配置后，推送 `vX.Y.Z` 标签会自动触发发布，标签版本必须与 `package.json` 一致。
+发布已有标签时，在 GitHub Actions 的 **Publish to npm** 工作流中点击 **Run workflow**，
+选择 `main`，输入已有标签（例如 `v1.8.5`）。工作流会检出该标签并执行测试、检查 npm 包内容，
+已存在的 npm 版本会跳过发布；不会修改或移动标签。
+正常标签发布会附带 npm provenance。若从 `main` 手动补发旧标签，事件提交与源码提交不同，
+工作流会关闭 provenance，避免把包标记为由错误的提交构建；OIDC 发布认证仍然生效。
+
 ## 📞 支持与反馈
 
 - 🐛 [问题反馈](https://github.com/lynse-ai/lynse-cli/issues)

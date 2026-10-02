@@ -4,33 +4,78 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish (for example, v1.8.5)
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: npm-publish-${{ github.ref }}
+  group: npm-publish-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
     steps:
+      - name: Validate release tag
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected an existing release tag in the form vX.Y.Z" >&2
+            exit 1
+          fi
+
       - name: Checkout tagged source
         uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Verify npm supports trusted publishing
+        run: |
+          NPM_VERSION=$(npm --version)
+          echo "npm $NPM_VERSION"
+          NPM_VERSION="$NPM_VERSION" node <<'NODE'
+          const actual = process.env.NPM_VERSION.split('.').map(Number);
+          const minimum = [11, 5, 1];
+          for (let index = 0; index < minimum.length; index++) {
+            if (actual[index] > minimum[index]) process.exit(0);
+            if (actual[index] < minimum[index]) process.exit(1);
+          }
+          NODE
 
       - name: Validate tag and package version
         run: |
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
-          TAG_VERSION=${GITHUB_REF_NAME#v}
+          TAG_VERSION=${RELEASE_TAG#v}
           echo "tag=$TAG_VERSION package=$PACKAGE_VERSION"
           test "$TAG_VERSION" = "$PACKAGE_VERSION"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt pytest
+
+      - name: Run tests
+        run: python -m pytest tests
 
       - name: Check package contents
         run: npm pack --dry-run
@@ -39,26 +84,25 @@ jobs:
         id: registry
         run: |
           PACKAGE_SPEC=$(node -p "require('./package.json').name + '@' + require('./package.json').version")
-          if npm view "$PACKAGE_SPEC" version >/dev/null 2>&1; then
+          if npm view "$PACKAGE_SPEC" version --json > "$RUNNER_TEMP/npm-version.json" 2> "$RUNNER_TEMP/npm-view.log"; then
             echo "published=true" >> "$GITHUB_OUTPUT"
             echo "$PACKAGE_SPEC is already published; nothing to do."
           else
+            cat "$RUNNER_TEMP/npm-view.log" >&2
+            node -e "const result = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')); process.exit(result.error?.code === 'E404' ? 0 : 1)" "$RUNNER_TEMP/npm-version.json"
             echo "published=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Verify npm credentials
-        if: steps.registry.outputs.published == 'false'
-        run: |
-          test -n "$NODE_AUTH_TOKEN"
-          npm whoami
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - name: Publish to npm
         if: steps.registry.outputs.published == 'false'
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # npm provenance uses the event SHA; an older tag dispatched from main has a different SHA.
+          if [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ]; then
+            export NPM_CONFIG_PROVENANCE=true
+          else
+            export NPM_CONFIG_PROVENANCE=false
+          fi
+          npm publish --access public --ignore-scripts
 
       - name: Verify published version
         run: |
