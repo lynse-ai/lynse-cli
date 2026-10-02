@@ -102,7 +102,7 @@ jobs:
           else
             export NPM_CONFIG_PROVENANCE=false
           fi
-          npm publish --access public --ignore-scripts
+          npm publish --access public --ignore-scripts --loglevel verbose
 
       - name: Verify published version
         run: |
