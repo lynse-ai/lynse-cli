@@ -1,0 +1,7 @@
+interface:
+  display_name: "灵光记 Lynse CLI"
+  short_description: "查询灵光记会议、转写和总结，管理待办、文件夹与设备"
+  default_prompt: "使用 $lynse-cli 查询我最近七天的灵光记会议，并汇总已有总结和待办。"
+
+policy:
+  allow_implicit_invocation: true

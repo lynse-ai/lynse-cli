@@ -1,43 +1,92 @@
-# Platform Paths (AI Assistant Environments)
+# Platform Paths and Setup
 
-The skill runs the same way in every AI assistant; only the install directory differs. Registry
-installs place the minimal skill bundle directly into that directory. The standalone npm package
-ships the same skill files plus a `lynse` shim for end-user shells, but an agent must call the
-Python entrypoint directly. Python 3.11 or newer is required in every environment.
+Python 3.11+ and `requests` from the bundled `requirements.txt` are required.
+Resolve the script beside the loaded `SKILL.md`; installation paths are not a
+calling convention. The installed npm `lynse` shim is for end-user shells;
+agents use the Python entrypoint directly.
 
-## Skill Install Directories
+## Codex
 
-| Environment | Skills Directory | Env Vars |
-|-------------|------------------|----------|
-| Codex | Agent-selected Codex Skill directory | Manual `.env` or env vars |
-| Claude Code | `~/.claude/skills/lynse-cli/` | Manual `.env` or env vars |
-| Cursor | `~/.cursor/skills/lynse-cli/` | Manual `.env` or env vars |
-| Hermes | `~/.hermes/skills/lynse-cli/` | Manual `.env` or env vars |
-| OpenClaw | `~/.openclaw/workspace/skills/lynse-cli/` | Auto-injected by platform |
+For local standalone skills, Codex discovers `<repo>/.agents/skills/lynse-cli/`
+and `~/.agents/skills/lynse-cli/`. Existing installations may use another path,
+including `~/.codex/skills/`; always use the path Codex actually supplies.
+The optional `agents/openai.yaml` supplies UI metadata and keeps implicit
+invocation enabled. It declares no MCP dependency because this skill calls the
+bundled CLI.
 
-## How the Skill Is Invoked in Each Environment
-
-All environments invoke the skill the same way once installed — the AI assistant runs the Python entrypoint inside its skills directory:
+For distribution, build a plugin from the repository:
 
 ```bash
-python3 lynse.py <command> [args...]   # macOS / Linux
-python lynse.py <command> [args...]    # Windows (or: py -3 lynse.py)
+python3 scripts/build_skill_package.py --codex
+codex plugin marketplace add ./dist/codex
 ```
 
-No single interpreter name works on every platform — modern macOS (Homebrew) and recent
-Ubuntu/Debian ship only `python3`, while Windows exposes `python` (not `python3`). Pick by
-environment; if unsure, run `<candidate> lynse.py version` and use whichever prints a version
-string.
+The build creates `dist/lynse-cli-codex-plugin.zip` and a local marketplace at
+`dist/codex/.agents/plugins/marketplace.json`. The marketplace points to
+`dist/codex/plugins/lynse-cli`, which contains portable `plugin.json`, a Codex
+compatibility manifest, and the complete `skills/lynse-cli/` payload. Keep the
+marketplace directory in place after adding it. Install Lynse CLI from that
+marketplace in the desktop Plugins Directory; on clients with CLI installation,
+use `codex plugin add lynse-cli@lynse-local`.
 
-The other difference across environments is **how env vars reach the process**:
+Codex loads an installed plugin's cached skill copy. Resolve that copy's script
+from its `SKILL.md`; do not hardcode a cache path or execute the source repository
+instead. When changing source files, rebuild and refresh the marketplace/plugin,
+then test in a new chat. Avoid enabling a standalone and plugin copy of the same
+skill together: Codex does not merge skills with duplicate names.
 
-- **OpenClaw**: injects `LYNSE_API_HOST` and `LYNSE_API_KEY` automatically.
-- **Codex and other environments**: read from `.env`, `~/.lynse/config.json`, or exported env vars (see `references/auth-and-security.md`).
+The plugin packages instructions and code, not Python, dependencies, or account
+credentials. Installing it does not sign into Lynse. It requires a local Codex
+execution environment with Python, network access, and the configured Lynse key;
+a remote/cloud environment must have its own runtime and credentials.
 
-## Cross-Platform Execution Rules
+## Python setup
 
-1. Use `python3` on macOS/Linux, `python` (or `py -3`) on Windows. Never assume one name works everywhere.
-2. Never wrap commands in shell scripts — they don't run on Windows. Call `lynse.py` directly.
-3. The `lynse` npm shim, `npx`, and npm installers are end-user tools; an agent must never invoke them. Always call the Python entrypoint instead.
-4. Never call the Lynse HTTP API directly (`curl` / `fetch` / requests against `$LYNSE_API_HOST`) — `lynse.py` subcommands are the only supported interface.
-5. On Windows, call `python lynse.py ...` or `py -3 lynse.py ...` directly from the skill directory. For npm installs, the `lynse` command is provided by `bin/lynse.js`, and npm creates the Windows `.cmd` shim automatically.
+Prefer an existing environment with the required packages. Otherwise create a
+virtual environment in a writable workspace, outside the plugin cache:
+
+```bash
+# macOS / Linux; replace /absolute/skill/path with the loaded skill directory
+python3 -m venv .venv
+.venv/bin/python -m pip install -r "/absolute/skill/path/requirements.txt"
+LYNSE_NO_UPDATE_CHECK=1 .venv/bin/python "/absolute/skill/path/lynse.py" version --json
+```
+
+```powershell
+# Windows PowerShell
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r "C:\absolute\skill\path\requirements.txt"
+$env:LYNSE_NO_UPDATE_CHECK = "1"
+.venv\Scripts\python.exe "C:\absolute\skill\path\lynse.py" version --json
+```
+
+Use the selected virtual-environment interpreter for subsequent commands.
+The user's own terminal can run `auth login` at that script path to enter the key
+privately. Credentials are saved outside the plugin in `~/.lynse/config.json`;
+transient tokens use `~/.lynse/tokens.json`. A restart or refreshed cache preserves
+those user files. An injected environment can supply `LYNSE_API_KEY` instead.
+Do not copy secrets into the plugin or its ZIP.
+
+## Other assistant environments
+
+| Environment | Typical standalone directory | Credentials |
+|-------------|------------------------------|-------------|
+| Claude Code | `~/.claude/skills/lynse-cli/` | User config or process environment |
+| Cursor | `~/.cursor/skills/lynse-cli/` | User config or process environment |
+| Hermes | `~/.hermes/skills/lynse-cli/` | User config or process environment |
+| OpenClaw | `~/.openclaw/workspace/skills/lynse-cli/` | Platform-injected environment or user config |
+
+The CLI also supports a legacy `.env` beside its script at lowest precedence.
+A project `.env` in the current working directory is not automatically loaded,
+and Codex does not inject credentials from OpenClaw's `primaryEnv` metadata.
+See [auth-and-security.md](auth-and-security.md) for resolution and host trust.
+
+Sources: [Codex skill discovery](https://learn.chatgpt.com/docs/build-skills) and
+[OpenAI plugin packaging](https://developers.openai.com/plugins/build/plugins).
+
+OpenClaw accepts `python3`, `python`, or `py` through `requires.anyBins`; the
+skill still verifies Python 3.11+ at runtime. `primaryEnv` supports platform key
+injection, while no required-env discovery gate blocks saved-config login.
+OpenClaw host env injection does not automatically reach sandbox containers;
+configure runtime credentials in the actual execution environment when sandboxed.
+See the [OpenClaw skill format](https://docs.openclaw.ai/tools/skills).

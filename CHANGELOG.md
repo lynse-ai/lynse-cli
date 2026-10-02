@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.8.5 (2026-10-02)
+
+### New Features
+
+- Add a Codex plugin package and local marketplace, with portable and Codex-compatible manifests and skill UI metadata.
+
+### Changed
+
+- Keep one shared Python CLI skill for Codex, Claude Code, Cursor, Hermes, OpenClaw, SkillHub, and WorkBuddy; resolve scripts from the installed skill directory instead of the working directory.
+- Refine skill discovery, private credential setup, user authorization, transcript search guidance, and error recovery; move detailed commands into a focused reference.
+- Accept alternative Python executables and saved-config authentication in OpenClaw discovery.
+- Synchronize the Python package version with the CLI and skill distribution.
+- Include all referenced resources in standalone and plugin packages, and verify extracted packages run from unrelated directories without network access.
+
+### Removed
+
+- Remove the unavailable `todos offline` command and API method. Use `todos list` or `todos range` instead.
+
 ## 1.8.4 (2026-09-30)
 
 ### New Features

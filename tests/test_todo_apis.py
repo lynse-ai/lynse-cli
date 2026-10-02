@@ -1,4 +1,4 @@
-"""Offline checks for the Todo API surface: insert / count / range / offline / batch update."""
+"""Offline checks for the Todo API surface: insert / count / range / batch update."""
 
 import unittest
 
@@ -105,14 +105,6 @@ class CountAndListTests(unittest.TestCase):
         _, _, kwargs = capture.calls[0]
         self.assertEqual(kwargs['json_data']['startTime'], '2026-09-01 08:30:00')
         self.assertEqual(kwargs['json_data']['endTime'], '2026-09-01 12:00:00')
-
-    def test_offline_list_posts_empty_body(self):
-        capture = _Capture()
-        api, _ = make_api(capture)
-        api.list_offline_todos()
-        method, path, kwargs = capture.calls[0]
-        self.assertEqual((method, path), ('POST', '/api/business/file/todo/offline/list'))
-        self.assertEqual(kwargs['json_data'], {})
 
 
 class UpdateTodosTests(unittest.TestCase):
@@ -232,7 +224,6 @@ class CliHandlerTests(unittest.TestCase):
     def test_subcommand_aliases_resolve(self):
         for sub, expected in (('add', 'insertTodos'), ('count', 'countTodos'),
                               ('range', 'listTodosByRange'),
-                              ('offline', 'listOfflineTodos'),
                               ('update', 'rescheduleTodo')):
             command, args, _ = lynse._resolve_alias('todos', [sub, 'x'])
             self.assertEqual((command, args), (expected, ['x']))
@@ -249,14 +240,12 @@ class FormattingTests(unittest.TestCase):
     def test_insert_text_and_list_tables(self):
         self.assertEqual(lynse._format_text({'code': 200, 'data': True}, 'insertTodos'),
                          'Todos inserted.')
-        offline = lynse._format_table({'data': [
-            {'isCompleted': 1, 'todoContent': 'x', 'owner': 'Ann', 'syncStatus': 1}
-        ]}, 'listOfflineTodos')
-        self.assertIn('Owner', offline)
-        self.assertIn('Sync', offline)
         ranged = lynse._format_table({'data': [
-            {'isCompleted': 0, 'todoContent': 'y', 'expectedCompleteTime': '2026-10-01 08:00:00'}
+            {'isCompleted': 1, 'todoContent': 'x', 'owner': 'Ann', 'syncStatus': 1,
+             'expectedCompleteTime': '2026-10-01 08:00:00'}
         ]}, 'listTodosByRange')
+        self.assertIn('Owner', ranged)
+        self.assertIn('Sync', ranged)
         self.assertIn('Deadline', ranged)
         self.assertIn('2026-10-01 08:00:00', ranged)
 

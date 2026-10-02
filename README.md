@@ -34,10 +34,63 @@ npx skills add lynse-ai/lynse-cli
 npm install -g @lynse.ai/lynse-cli
 
 # Python 项目复用同一 API 客户端
-python3 -m pip install "git+https://github.com/lynse-ai/lynse-cli.git@v1.8.3"
+python3 -m pip install "git+https://github.com/lynse-ai/lynse-cli.git@v1.8.5"
 ```
 
 **正式 API 地址**: `https://api.lynse.cn`（默认使用；自定义地址须为 HTTPS）
+
+### 在 Codex 中使用（推荐插件方式）
+
+按照 [OpenAI 插件打包规范](https://developers.openai.com/plugins/build/plugins)，
+本项目提供只包含 skill 和 Python CLI 的插件，同时兼容普通 skill 安装。
+
+在仓库根目录构建并添加本地 marketplace：
+
+```bash
+python3 scripts/build_skill_package.py --codex
+codex plugin marketplace add ./dist/codex
+```
+
+构建产物：
+
+- `dist/lynse-cli-codex-plugin.zip`：包含完整运行文件的插件 ZIP。
+- `dist/codex/`：可直接添加的本地 marketplace，保留此目录供后续刷新。
+
+在桌面端 Plugins Directory 选择 **Lynse Local Plugins** 来源并安装 **灵光记 Lynse CLI**。
+支持命令行安装的 Codex 版本也可运行：
+
+```bash
+codex plugin add lynse-cli@lynse-local
+```
+
+插件不自带 Python、依赖或凭据。需要 Python 3.11+；复用已有 Python 环境，
+或在可写工作目录创建虚拟环境。以下是 macOS / Linux 的首次配置示例：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r dist/codex/plugins/lynse-cli/skills/lynse-cli/requirements.txt
+.venv/bin/python dist/codex/plugins/lynse-cli/skills/lynse-cli/lynse.py auth login
+```
+
+`auth login` 会在用户自己的终端私下读取密钥并保存到 `~/.lynse/config.json`。
+已配置的账号可直接复用；不需要把密钥贴进聊天或写入插件目录。
+Windows 的 Python、虚拟环境及路径说明见
+[平台与安装参考](references/platform-paths.md)。
+
+安装后在新聊天中输入：
+
+```text
+使用 $lynse-cli 查询我最近七天的灵光记会议，并汇总已有总结和待办。
+```
+
+插件模式可从 skill 选择器选择 `lynse-cli`；宿主可能显示 `lynse-cli:lynse-cli`
+这样的插件命名空间。自然语言提到 Lynse / 灵光记也可以触发。
+Codex 会从实际加载的 skill 路径定位 CLI，不依赖当前工作目录。
+
+若只需要普通 skill，运行 `python3 scripts/build_skill_package.py`，将生成的
+`dist/lynse-cli-skill.zip` 解压到 `~/.agents/skills/lynse-cli/` 或项目的
+`.agents/skills/lynse-cli/`。插件和普通 skill 选择一种启用，避免同名副本重复出现。
+源文件改动后需重新构建并刷新插件；不要在插件缓存内运行 CLI 的 `update`。
 
 ### 配置
 
@@ -67,7 +120,8 @@ lynse todos list
 
 ## 📖 详细文档
 
-- 📋 [命令参考](SKILL.md) - 完整命令列表
+- 📋 [命令参考](references/commands.md) - 完整命令列表
+- 🤖 [Skill 工作流](SKILL.md) - Codex 调用方式、认证和授权边界
 - 🔄 [更新日志](CHANGELOG.md) - 版本更新记录
 - 🔌 [MCP 服务仓库](https://github.com/lynse-ai/lynse-mcp) - 独立的 MCP 服务项目
 

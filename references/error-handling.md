@@ -15,7 +15,7 @@
 | Rate limited | 429 | Retry reads with a short backoff; report writes for manual review. |
 | Not found | 404 | "Resource not found." |
 | Server error | 500/502/503 | Retry safe reads; report writes, including writes exposed as GET endpoints, without automatic retry. |
-| Token refresh failed | — | Prompt to check `LYNSE_API_KEY` |
+| Token refresh failed | — | For rejected credentials (401/403), ask the user to check their key privately. For 429/5xx/network errors, report a transient auth-service failure; do not label the key invalid. |
 | Business error (code != 200) | — | Show error message with possible cause and fix |
 
 ## Reporting Errors to Users

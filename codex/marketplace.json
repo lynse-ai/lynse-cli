@@ -1,0 +1,20 @@
+{
+  "name": "lynse-local",
+  "interface": {
+    "displayName": "Lynse Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "lynse-cli",
+      "source": {
+        "source": "local",
+        "path": "./plugins/lynse-cli"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

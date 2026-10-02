@@ -70,7 +70,7 @@ except ImportError:
 
 
 # CLI 版本
-CLI_VERSION = '1.8.4'
+CLI_VERSION = '1.8.5'
 DEFAULT_API_HOST = 'https://api.lynse.cn'
 
 # npm 自更新：包名 / registry / 版本检查节流间隔 / 可自替换的技能文件白名单
@@ -151,7 +151,6 @@ _SUBCOMMAND_ALIASES = {
         'add': 'insertTodos',
         'count': 'countTodos',
         'range': 'listTodosByRange',
-        'offline': 'listOfflineTodos',
         'clear': 'clearCompletedTodos',
         'delete': 'deleteTodos',
         'reschedule': 'rescheduleTodo',
@@ -194,7 +193,6 @@ _ALIAS_HANDLERS = {
     'insertTodos': lambda api, a: _handle_insert_todos(api, a),
     'countTodos': lambda api, a: api.count_todos(),
     'listTodosByRange': lambda api, a: _handle_todos_range(api, a),
-    'listOfflineTodos': lambda api, a: api.list_offline_todos(),
     'clearCompletedTodos': lambda api, a: api.clear_completed_todos(),
     'deleteTodos': lambda api, a: _handle_delete_todos(api, a),
     'rescheduleTodo': lambda api, a: _handle_reschedule_todo(api, a),
@@ -226,7 +224,6 @@ _ALIAS_INFO = {
     'insertTodos': 'todos add',
     'countTodos': 'todos count',
     'listTodosByRange': 'todos range',
-    'listOfflineTodos': 'todos offline',
     'clearCompletedTodos': 'todos clear',
     'deleteTodos': 'todos delete',
     'rescheduleTodo': 'todos reschedule',
@@ -1041,7 +1038,7 @@ def _format_text(result: dict, command: str) -> str:
             if isinstance(item, dict):
                 lines.append(f'  [{item.get("id", "?")}] {item.get("folderName") or item.get("name") or "?"}')
         return '\n'.join(lines)
-    if command in ('listTodos', 'listTodosByRange', 'listOfflineTodos'):
+    if command in ('listTodos', 'listTodosByRange'):
         items = data if isinstance(data, list) else []
         if not items:
             return 'No todos found.'
@@ -1107,11 +1104,8 @@ def _format_table(result: dict, command: str) -> str:
         'searchFiles': file_columns,
         'listFolders': [('ID', 'id'), ('Name', 'folderName')],
         'listTodos': [('Done', 'isCompleted'), ('Content', 'todoContent'), ('Deadline', 'expectedCompleteTime')],
-        # 范围查询/离线全量下发携带 owner 与同步标记，多出两列便于比对
+        # 范围查询携带 owner 与同步标记，多出两列便于比对
         'listTodosByRange': [('Done', 'isCompleted'), ('Content', 'todoContent'),
-                             ('Deadline', 'expectedCompleteTime'), ('Owner', 'owner'),
-                             ('Sync', 'syncStatus')],
-        'listOfflineTodos': [('Done', 'isCompleted'), ('Content', 'todoContent'),
                              ('Deadline', 'expectedCompleteTime'), ('Owner', 'owner'),
                              ('Sync', 'syncStatus')],
         'getMyDevices': [('ID', 'id'), ('SN', 'serialNumber'), ('Name', 'deviceName')],
@@ -2349,11 +2343,6 @@ class LynseAPI:
         return self._request('POST', '/api/business/file/todo/list', json_data=body,
                              _retry_safe=True)
 
-    def list_offline_todos(self) -> Dict[str, Any]:
-        """全量下发待办列表（不过滤云同步标记，携带 syncStatus/deleteSource 等）。"""
-        return self._request('POST', '/api/business/file/todo/offline/list', json_data={},
-                             _retry_safe=True)
-
     def update_todos(self, updates) -> Dict[str, Any]:
         """按 todoId 批量更新待办（列表内 todoId 不可重复）。
 
@@ -2960,7 +2949,6 @@ def _print_help():
             ("todos add <content> [flags]", "Insert todo(s): --file/--deadline/--weight/--owner/--sync, repeat --content, or pass a JSON array (max 100)"),
             ("todos count", "Deadline statistics (week/month/later/no-date/expired)"),
             ("todos range [start] [end] [--status 0|1]", "Query todos by expected completion time (--page/--size optional)"),
-            ("todos offline", "Full todo download including sync markers"),
             ("todos delete <ids>", "Delete todos"),
             ("todos clear", "Clear completed todos"),
             ("todos reschedule <id> <deadline>", "Change a todo deadline (or pass a JSON array to batch-update fields)"),

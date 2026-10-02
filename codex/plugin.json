@@ -1,0 +1,30 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "lynse-cli",
+  "description": "Query Lynse meeting transcriptions and summaries, and manage todos, files, folders, and devices through the Lynse CLI.",
+  "author": {
+    "name": "lynse.ai",
+    "url": "https://www.lynse.ai"
+  },
+  "homepage": "https://www.lynse.ai",
+  "repository": "https://github.com/lynse-ai/lynse-cli",
+  "license": "MIT",
+  "keywords": ["lynse", "灵光记", "meetings", "transcription", "todos"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "灵光记 Lynse CLI",
+        "shortDescription": "查询灵光记会议、转写和总结，管理待办、文件夹与设备",
+        "longDescription": "通过 Lynse CLI 查询灵光记会议记录、转写和总结，整理待办并管理文件、文件夹、账户和设备。使用已配置的 Lynse API Key；按需读取资料，写入操作遵循用户授权。需要本地 Python 3.11 或更新版本和 requests。",
+        "developerName": "lynse.ai",
+        "category": "Productivity",
+        "capabilities": ["Read", "Write"],
+        "websiteURL": "https://www.lynse.ai",
+        "defaultPrompt": [
+          "使用 Lynse 查询我最近七天的灵光记会议，并汇总已有总结和待办。",
+          "使用 Lynse 搜索我的会议转写记录，并附上对应会议和时间。"
+        ]
+      }
+    }
+  }
+}
