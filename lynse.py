@@ -27,6 +27,8 @@ import warnings
 from pathlib import Path
 import platform
 import time
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Union
 from urllib.parse import urlsplit
@@ -72,6 +74,22 @@ except ImportError:
 # CLI 版本
 CLI_VERSION = '1.8.5'
 DEFAULT_API_HOST = 'https://api.lynse.cn'
+
+# Shared protocol contract: CLI and MCP adapters consume the same operation list.
+TRANSCRIPTION_OPERATIONS = {
+    'transcribe_file': {'command': 'transcribeFile', 'subcommand': 'transcribe',
+                        'mcp_tool': 'transcribe_meeting', 'write': True,
+                        'title': 'Submit Lynse transcription and summary'},
+    'get_transcription_status': {'command': 'getTranscriptionStatus',
+                                'subcommand': 'transcribe-status',
+                                'mcp_tool': 'get_transcription_status', 'write': False,
+                                'max_batch': 100,
+                                'title': 'Get Lynse transcription task status'},
+    'auto_transcribe_new_recordings': {'command': 'autoTranscribe',
+                                     'subcommand': 'auto-transcribe',
+                                     'mcp_tool': 'auto_transcribe_new_recordings', 'write': True,
+                                     'title': 'Scan new Lynse recordings for transcription'},
+}
 
 # npm 自更新：包名 / registry / 版本检查节流间隔 / 可自替换的技能文件白名单
 NPM_PACKAGE = '@lynse.ai/lynse-cli'
@@ -169,6 +187,11 @@ _SUBCOMMAND_ALIASES = {
     },
 }
 
+_SUBCOMMAND_ALIASES['meetings'].update({
+    operation['subcommand']: operation['command']
+    for operation in TRANSCRIPTION_OPERATIONS.values()
+})
+
 _ALIAS_HANDLERS = {
     'listFilesByTimeRange': lambda api, a: api.list_files_by_time_range(_extract_days(a)),
     'listFilesByMonth': lambda api, a: api.list_files_by_month(*_parse_month_args(a)),
@@ -177,6 +200,8 @@ _ALIAS_HANDLERS = {
     'searchFiles': lambda api, a: api.search_files(a[0], **_extract_page_kwargs(a[1:])) if a else _missing_arg('search keyword'),
     'getTranscriptionRecord': lambda api, a: api.get_transcription_record(a[0]) if a else _missing_arg('file ID'),
     'getTranscriptionText': lambda api, a: api.get_transcription_text(a[0]) if a else _missing_arg('file ID'),
+    'transcribeFile': lambda api, a: _handle_transcribe(api, a),
+    'getTranscriptionStatus': lambda api, a: api.get_transcription_status(a) if a else _missing_arg('file ID(s)'),
     'getAudioFile': lambda api, a: api.get_audio_file(a[0]) if a else _missing_arg('file ID'),
     'getConclusion': lambda api, a: api.get_conclusion(
         a[0], first_only='--all' not in a[1:]
@@ -210,6 +235,9 @@ _ALIAS_INFO = {
     'searchFiles': 'meetings search',
     'getTranscriptionRecord': 'meetings transcript',
     'getTranscriptionText': 'meetings transcript-text',
+    'transcribeFile': 'meetings transcribe',
+    'getTranscriptionStatus': 'meetings transcribe-status',
+    'autoTranscribe': 'meetings auto-transcribe',
     'getAudioFile': 'meetings audio',
     'getConclusion': 'meetings summary',
     'getFileInfo': 'meetings info',
@@ -627,6 +655,153 @@ def _parse_week_args(args: list):
     return datetime.now().isocalendar()[0], int(token)
 
 
+def _parse_transcribe_args(args: list, *, automatic: bool = False) -> dict:
+    options = {}
+    value_flags = {'--template': 'template_id', '--model': 'model_id',
+                   '--language': 'language_id'}
+    if automatic:
+        options.update(once=False, interval=60, state_file=None)
+        value_flags.update({'--interval': 'interval', '--state-file': 'state_file'})
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if automatic and arg == '--once':
+            options['once'] = True
+        elif arg in value_flags:
+            if i + 1 >= len(args) or args[i + 1].startswith('--') or not args[i + 1].strip():
+                raise LynseAPIError(f'{arg} requires a value.')
+            options[value_flags[arg]] = args[i + 1].strip()
+            i += 1
+        elif not automatic and not arg.startswith('-') and 'file_id' not in options:
+            options['file_id'] = arg
+        else:
+            raise LynseAPIError(f'Unknown transcription argument: {arg}')
+        i += 1
+    if automatic:
+        try:
+            options['interval'] = int(options['interval'])
+        except (TypeError, ValueError):
+            raise LynseAPIError('--interval must be an integer (at least 10 seconds).')
+        if options['interval'] < 10:
+            raise LynseAPIError('--interval must be at least 10 seconds.')
+    elif not options.get('file_id'):
+        raise LynseAPIError('Missing file ID.')
+    return options
+
+
+def _handle_transcribe(api, args: list):
+    return api.transcribe_file(**_parse_transcribe_args(args))
+
+
+@contextmanager
+def _auto_transcribe_lock(path: Path):
+    """Hold an OS lock for one scan; process termination releases it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path) + '.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, 'r+b') as lock_file:
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                if os.fstat(lock_file.fileno()).st_size == 0:
+                    lock_file.write(b'\0')
+                    lock_file.flush()
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise LynseAPIError('Another auto-transcribe scan is using this state file.') from error
+        try:
+            yield
+        finally:
+            if os.name == 'nt':
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _save_auto_transcribe_state(path: Path, state: dict):
+    """Persist before submitting a charged request, atomically and privately."""
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                         prefix=path.name + '.', delete=False) as handle:
+            temp_path = Path(handle.name)
+            json.dump(state, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+_UNSTARTED_TRANSCRIPTION = {'not_started', 'untranscribed', 'not_transcribed', 'idle'}
+_EXISTING_TRANSCRIPTION = {
+    'running', 'queueing', 'queued', 'pending', 'processing', 'transcribing', 'summarizing',
+    'success', 'succeeded', 'completed', 'complete', 'done', 'finished', '1',
+    'fail', 'failed', 'failure', 'error', 'errored', 'canceled', 'cancelled', '-1',
+}
+
+
+def _new_recording_readiness(info: dict, remote_status) -> str:
+    """Fail closed for unknown pipeline/upload states; never rerun existing jobs."""
+    details = remote_status if isinstance(remote_status, dict) else {}
+    statuses = [info.get('transcribeStatus'), details.get('status')
+                if isinstance(remote_status, dict) else remote_status]
+    statuses = {str(value).strip().lower() for value in statuses if value is not None}
+    statuses.discard('')
+    if info.get('transcribeTaskId') or details.get('taskId') or statuses & _EXISTING_TRANSCRIPTION:
+        return 'existing_transcription'
+    if statuses - _UNSTARTED_TRANSCRIPTION:
+        return 'unknown_transcription_status'
+    if not statuses and 'transcribeStatus' not in info:
+        return 'unknown_transcription_status'
+    content_type = str(info.get('contentType') or '').split(';')[0].strip().lower()
+    filename = str(info.get('originalFilename') or info.get('filename') or '')
+    if content_type in ('', 'application/octet-stream'):
+        content_type = mimetypes.guess_type(filename)[0] or ''
+        if Path(filename).suffix.lower() in ('.wav', '.mp3', '.m4a', '.m4b', '.aac', '.ogg',
+                                             '.opus', '.flac', '.amr', '.wma', '.aiff', '.caf'):
+            content_type = 'audio/unknown'
+    if not content_type:
+        return 'unknown_file_type'
+    if not content_type.startswith('audio/'):
+        return 'not_audio'
+    upload_status = info.get('uploadStatus')
+    if upload_status not in (None, '', 2, '2'):
+        return 'upload_not_complete'
+    try:
+        duration = float(info.get('bizDuration') or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    if not info.get('url') or not duration > 0:
+        return 'upload_not_complete'
+    return 'ready'
+
+
+def _handle_auto_transcribe(api, args: list, flags: dict):
+    options = _parse_transcribe_args(args, automatic=True)
+    once = options.pop('once')
+    interval = options.pop('interval')
+    if not once and flags.get('output_file'):
+        raise LynseAPIError('--output requires --once for auto-transcribe.')
+    try:
+        while True:
+            result = api.auto_transcribe_new_recordings(**options)
+            _format_output(result, 'autoTranscribe', flags)
+            sys.stdout.flush()
+            if result['data']['needsReview']:
+                sys.exit(EXIT_SERVER)
+            if once:
+                return
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print('Auto-transcribe stopped.', file=sys.stderr)
+
+
 def _resolve_alias(command: str, args: list):
     """将友好命令别名解析为内部命令名。返回 (canonical, modified_args, is_alias)。"""
     if command in _SIMPLE_ALIASES:
@@ -1018,6 +1193,21 @@ def _format_text(result: dict, command: str) -> str:
         return _transcription_entries_to_text(data)
     if command == 'getTranscriptionText':
         return str(data or '')
+    if command == 'transcribeFile':
+        d = data if isinstance(data, dict) else {}
+        return f"Transcription submitted. Task: {d.get('taskId', 'unknown')}\nRequired points: {d.get('requiredPoints', 'server determined')}"
+    if command == 'autoTranscribe':
+        d = data if isinstance(data, dict) else {}
+        if d.get('initialized'):
+            return (f"Auto-transcribe initialized; {d.get('baselineCount', 0)} existing files skipped.\n"
+                    f"State: {d.get('stateFile', '')}")
+        lines = [f"Submitted: {len(d.get('submitted', []))}; skipped: {len(d.get('skipped', []))}; "
+                 f"pending: {len(d.get('pending', []))}; needs review: {len(d.get('needsReview', []))}"]
+        for key in ('submitted', 'skipped', 'pending', 'needsReview'):
+            for item in d.get(key, []):
+                lines.append(f"  [{item['fileId']}] {key}: "
+                             f"{item.get('error') or item.get('reason') or item.get('taskId') or item.get('state', '')}")
+        return '\n'.join(lines)
     if command == 'getOutline':
         return str(data) if data else 'No outline available.'
     if command == 'getFileInfo':
@@ -2041,7 +2231,7 @@ class LynseAPI:
             params={'pageNum': safe_page, 'pageSize': safe_page_size},
         )
 
-    def list_files_paged(self, page_size: int = 100) -> Dict[str, Any]:
+    def list_files_paged(self, page_size: int = 100, *, strict: bool = False) -> Dict[str, Any]:
         """分页拉取全部文件，避免默认列表接口返回数量被截断。"""
         page_size = max(1, min(int(page_size or 100), 500))
         page = 1
@@ -2052,18 +2242,28 @@ class LynseAPI:
         while True:
             response = self.page_files(page, page_size)
             payload = response.get('data')
+            if strict and not isinstance(payload, (list, dict)):
+                raise LynseAPIError('Cannot establish a complete file inventory for auto-transcribe.')
             items = payload if isinstance(payload, list) else []
             if isinstance(payload, dict):
+                if strict and not any(isinstance(payload.get(key), list)
+                                      for key in ('records', 'list', 'rows', 'items')):
+                    raise LynseAPIError('Unexpected file page format for auto-transcribe.')
                 for key in ('records', 'list', 'rows', 'items'):
                     value = payload.get(key)
                     if isinstance(value, list):
                         items = value
                         break
 
+            previous_count = len(all_items)
             for item in items:
                 if not isinstance(item, dict):
+                    if strict:
+                        raise LynseAPIError('Invalid file record for auto-transcribe.')
                     continue
                 item_id = str(item.get('id') or '')
+                if strict and not item_id:
+                    raise LynseAPIError('File record is missing its ID.')
                 if item_id and item_id in seen_ids:
                     continue
                 if item_id:
@@ -2078,13 +2278,19 @@ class LynseAPI:
             except (TypeError, ValueError):
                 total = None
 
+            if strict and items and len(all_items) == previous_count:
+                raise LynseAPIError('File pagination repeated a page; auto-transcribe scan aborted.')
             if not items:
+                if strict and total is not None and len(all_items) < total:
+                    raise LynseAPIError('Incomplete file inventory; auto-transcribe scan aborted.')
                 break
             if total is not None and len(all_items) >= total:
                 break
-            if len(items) < page_size:
+            if len(items) < page_size and (not strict or total is None):
                 break
             page += 1
+            if strict and page > 1000:
+                raise LynseAPIError('File inventory exceeds the auto-transcribe scan limit.')
 
         return {
             'code': 200,
@@ -2733,6 +2939,153 @@ class LynseAPI:
             aliases.add(f'发言人{normalized}')
         return {item for item in aliases if item}
 
+    def transcribe_file(self, file_id: str, *, template_id: str = None,
+                        model_id: str = None, language_id: str = None) -> Dict[str, Any]:
+        """提交云端转写及总结任务；可能消耗积分，失败后不自动重试。"""
+        body = {'fileId': self._transcription_id(file_id)}
+        for key, value in (('templateId', template_id), ('modelId', model_id),
+                           ('languageId', language_id)):
+            if value is not None:
+                body[key] = self._transcription_id(value)
+        return self._request('POST', '/api/business/file/trans', json_data=body,
+                             _retry_safe=False)
+
+    def get_transcription_status(self, file_ids: List[str]) -> Dict[str, Any]:
+        """查询转写状态；虽使用 POST，但此接口只读，可安全重试。"""
+        if isinstance(file_ids, str):
+            file_ids = [file_ids]
+        maximum = TRANSCRIPTION_OPERATIONS['get_transcription_status']['max_batch']
+        if not isinstance(file_ids, (list, tuple)) or not 1 <= len(file_ids) <= maximum:
+            raise LynseAPIError(f'Provide between 1 and {maximum} file IDs.')
+        ids = list(dict.fromkeys(self._transcription_id(value) for value in file_ids))
+        return self._request('POST', '/api/business/file/trans/status',
+                             json_data={'fileIds': ids}, _retry_safe=True)
+
+    def _transcription_id(self, value) -> str:
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            raise LynseAPIError('Transcription IDs must be nonempty strings or integers.')
+        cleaned = str(value).strip()
+        if not cleaned or cleaned != self._sanitize_param(cleaned, 'safe'):
+            raise LynseAPIError('Invalid transcription ID.')
+        return cleaned
+
+    def auto_transcribe_new_recordings(self, *, state_file: str = None,
+                                       template_id: str = None, model_id: str = None,
+                                       language_id: str = None) -> Dict[str, Any]:
+        """扫描当前账户新增云端录音；首次只建立基线，提交前持久化去重。"""
+        options = dict(template_id=template_id, model_id=model_id, language_id=language_id)
+        for value in options.values():
+            if value is not None:
+                self._transcription_id(value)
+        customer = self.get_current_customer().get('data')
+        if not isinstance(customer, dict) or not customer.get('id'):
+            raise LynseAPIError('Cannot verify the current account for auto-transcribe.')
+        owner_id = str(customer['id'])
+        account_key = hashlib.sha256(f'{self.api_host}\n{owner_id}'.encode()).hexdigest()[:24]
+        state_root = os.environ.get('LYNSE_AUTO_TRANSCRIBE_STATE_DIR')
+        state_directory = (Path(state_root).expanduser().resolve() if state_root else
+                           _get_user_config_dir() / 'auto-transcribe')
+        path = Path(state_file).expanduser().resolve() if state_file else (
+            state_directory / f'{account_key}.json')
+        report = {'initialized': False, 'stateFile': str(path), 'submitted': [],
+                  'skipped': [], 'pending': [], 'needsReview': []}
+        with _auto_transcribe_lock(path):
+            inventory = self.list_files_paged(strict=True)['data']
+            current_ids = {self._transcription_id(item['id']) for item in inventory}
+            if not path.exists():
+                state = {'version': 1, 'apiHost': self.api_host, 'ownerId': owner_id,
+                         'seenIds': sorted(current_ids), 'pendingIds': [], 'attempts': {}}
+                _save_auto_transcribe_state(path, state)
+                report.update(initialized=True, baselineCount=len(current_ids))
+                return {'code': 200, 'data': report}
+            try:
+                state = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, ValueError) as error:
+                raise LynseAPIError('Cannot read auto-transcribe state; it was not reset.') from error
+            if (not isinstance(state, dict) or state.get('version') != 1 or
+                    state.get('apiHost') != self.api_host or state.get('ownerId') != owner_id or
+                    not isinstance(state.get('seenIds'), list) or
+                    not isinstance(state.get('pendingIds'), list) or
+                    not isinstance(state.get('attempts'), dict)):
+                raise LynseAPIError('Auto-transcribe state is invalid or belongs to a different account/host.')
+            try:
+                seen = {self._transcription_id(value) for value in state['seenIds']}
+                pending = {self._transcription_id(value) for value in state['pendingIds']}
+                for file_id, attempt in state['attempts'].items():
+                    self._transcription_id(file_id)
+                    if not isinstance(attempt, dict) or attempt.get('state') not in (
+                            'submitting', 'submitted', 'needs_review'):
+                        raise ValueError('invalid attempt')
+                if not pending <= seen or not set(state['attempts']) <= seen:
+                    raise ValueError('invalid state IDs')
+            except (ValueError, LynseAPIError) as error:
+                raise LynseAPIError('Auto-transcribe state is corrupt; it was not reset.') from error
+            pending.update(current_ids - seen)
+            seen.update(current_ids)
+            # A crash during submission is ambiguous. Preserve it for review, never resubmit.
+            pending.difference_update(state['attempts'])
+            state.update(seenIds=sorted(seen), pendingIds=sorted(pending))
+            _save_auto_transcribe_state(path, state)
+            for file_id, attempt in state['attempts'].items():
+                if attempt['state'] != 'submitted':
+                    info = self.get_file_info(file_id).get('data')
+                    statuses = self.get_transcription_status([file_id]).get('data')
+                    if (not isinstance(info, dict) or str(info.get('id')) != file_id or
+                            not isinstance(statuses, dict)):
+                        raise LynseAPIError('Cannot verify the previous transcription submission.')
+                    remote = statuses.get(file_id)
+                    if _new_recording_readiness(info, remote) == 'existing_transcription':
+                        task_id = info.get('transcribeTaskId') or (
+                            remote.get('taskId') if isinstance(remote, dict) else None)
+                        state['attempts'][file_id] = {'state': 'submitted', 'taskId': task_id}
+                        _save_auto_transcribe_state(path, state)
+                        report['skipped'].append({'fileId': file_id, 'reason': 'submission_confirmed'})
+                    else:
+                        report['needsReview'].append({'fileId': file_id, **attempt})
+            if report['needsReview']:
+                report['pending'] = [{'fileId': value, 'reason': 'submission_requires_review'}
+                                     for value in sorted(pending)]
+                return {'code': 200, 'data': report}
+            for file_id in sorted(pending):
+                if file_id not in current_ids:
+                    report['pending'].append({'fileId': file_id, 'reason': 'file_not_listed'})
+                    continue
+                info = self.get_file_info(file_id).get('data')
+                if not isinstance(info, dict) or str(info.get('id')) != file_id:
+                    raise LynseAPIError('Unexpected file details; auto-transcribe scan aborted.')
+                status = self.get_transcription_status([file_id]).get('data')
+                if not isinstance(status, dict):
+                    raise LynseAPIError('Unexpected transcription status response.')
+                readiness = _new_recording_readiness(info, status.get(file_id))
+                if readiness in ('existing_transcription', 'not_audio'):
+                    state['pendingIds'].remove(file_id)
+                    report['skipped'].append({'fileId': file_id, 'reason': readiness})
+                    _save_auto_transcribe_state(path, state)
+                    continue
+                if readiness != 'ready':
+                    report['pending'].append({'fileId': file_id, 'reason': readiness})
+                    continue
+                state['pendingIds'].remove(file_id)
+                state['attempts'][file_id] = {'state': 'submitting'}
+                _save_auto_transcribe_state(path, state)
+                try:
+                    response = self.transcribe_file(file_id, **options)
+                    task = response.get('data')
+                    if not isinstance(task, dict) or not task.get('taskId'):
+                        raise LynseAPIError('Submission returned no taskId; check server state before retrying.')
+                except LynseAPIError as error:
+                    state['attempts'][file_id] = {'state': 'needs_review', 'error': error.message}
+                    _save_auto_transcribe_state(path, state)
+                    report['needsReview'].append({'fileId': file_id, **state['attempts'][file_id]})
+                    break
+                state['attempts'][file_id] = {'state': 'submitted', 'taskId': task['taskId']}
+                _save_auto_transcribe_state(path, state)
+                report['submitted'].append({'fileId': file_id, **task})
+            reported_pending = {item['fileId'] for item in report['pending']}
+            report['pending'].extend({'fileId': value, 'reason': 'scan_stopped'}
+                                     for value in state['pendingIds'] if value not in reported_pending)
+        return {'code': 200, 'data': report}
+
     def get_transcription_record(self, file_id: str) -> Dict[str, Any]:
         """获取转写记录"""
         safe_id = self._sanitize_param(file_id, 'safe')
@@ -2931,6 +3284,9 @@ def _print_help():
             ("meetings search <keyword> [filters]", "Search titles; --from/--to YYYY-MM-DD, --page/--size N"),
             ("meetings transcript <id>", "Get meeting transcription"),
             ("meetings transcript-text <id>", "Get meeting transcription text"),
+            ("meetings transcribe <id>", "Submit cloud transcription + summary (uses credits)"),
+            ("meetings transcribe-status <ids...>", "Get transcription task status"),
+            ("meetings auto-transcribe [--once]", "Watch new cloud recordings; first scan skips existing files"),
             ("meetings audio <id>", "Get meeting audio download metadata"),
             ("meetings summary <id> [--all]", "Get first AI summary (or all with --all)"),
             ("meetings outline <id>", "Get meeting outline"),
@@ -3301,6 +3657,9 @@ def main():
         # 6. 初始化 API 并执行业务命令
         api = LynseAPI()
 
+        if command == 'autoTranscribe':
+            _handle_auto_transcribe(api, args, flags)
+            return
         if command in _ALIAS_HANDLERS:
             result = _ALIAS_HANDLERS[command](api, args)
         elif command == 'getUserInfo':

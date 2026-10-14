@@ -15,6 +15,9 @@ python3 lynse.py meetings range <start> <end>          # Meetings in a date rang
 python3 lynse.py meetings search <keyword> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--page N] [--size N]  # Search by title/date
 python3 lynse.py meetings transcript <id>              # Get transcription
 python3 lynse.py meetings transcript-text <id>         # Get transcription text
+python3 lynse.py meetings transcribe <id> [--template ID] [--model ID] [--language ID]  # Submit cloud transcription + summary (uses credits)
+python3 lynse.py meetings transcribe-status <ids...>   # Query status for 1-100 file IDs
+python3 lynse.py meetings auto-transcribe [--once] [--interval 60] [--state-file PATH] [--template ID] [--model ID] [--language ID]  # Watch new cloud audio recordings
 python3 lynse.py meetings audio <id>                   # Get audio download metadata
 python3 lynse.py meetings summary <id> [--all]         # Get first AI summary; --all returns every summary
 python3 lynse.py meetings outline <id>                 # Get outline
@@ -46,6 +49,46 @@ complete file inventory, `python3 lynse.py listFilesPaged 100 --json` fetches
 all pages. Prefer a requested date range to avoid unnecessary transcript reads.
 
 Search date filtering scans the paginated title matches and then applies the date range locally. It may take longer for broad searches.
+
+**Automatically transcribe new cloud recordings**:
+```bash
+python3 lynse.py meetings auto-transcribe --text         # Keep running; scan every 60 seconds
+python3 lynse.py meetings auto-transcribe --once --json  # One scan, suitable for a scheduler
+python3 lynse.py meetings transcribe FILE_ID --json      # Explicitly submit an existing recording
+python3 lynse.py meetings transcribe-status FILE_ID --json
+```
+The first scan records the complete current file inventory and submits nothing.
+Later scans submit newly observed **audio** files after upload completion and
+after verifying that no transcription task already exists. Uploads in progress
+are checked again on later scans. Existing, running, completed, and failed tasks
+are skipped. This invokes the backend's transcription **and summary** pipeline;
+it uses the account's normal credits/allowance. A returned `taskId` means the task
+was submitted, not that transcription has finished.
+
+Keep the process running, or schedule repeated `--once` calls with the same state
+file. The interval is at least 10 seconds. This CLI does not create a server-side
+automatic-transcription setting or install a background service. It does not
+watch local folders or upload local audio. Streaming `--json` emits one JSON object
+per scan; `--output` requires `--once`.
+
+State defaults to `~/.lynse/auto-transcribe/<account-host-hash>.json`, scoped to the
+account returned by the authenticated current-customer endpoint and API origin.
+An administrator can set `LYNSE_AUTO_TRANSCRIBE_STATE_DIR` to a persistent server
+directory; account/origin isolation is retained. CLI and MCP share this setting.
+It stores file/task IDs and submission outcomes, without credentials or recording
+content. Preserve this file across runs; a missing state file establishes a new
+baseline. A custom `--state-file` cannot be reused for another account or origin.
+Concurrent scans using the same state file are rejected; use one state file per
+account to retain deduplication across scheduled jobs.
+
+Before a charged submission, the CLI saves an attempt marker. Network errors,
+missing task IDs, or interruption during submission never cause automatic
+resubmission. `needsReview` stops the watcher with exit code 6. A later scan checks
+the server: if an existing task is confirmed, it clears that review condition
+without submitting again. Otherwise inspect `transcribe-status` and `meetings info`
+to determine whether the request was accepted. After resolving the cause, submit
+explicitly with `meetings transcribe` only when the user authorizes the retry; the
+next scan reconciles the confirmed task. Corrupt state is rejected without reset.
 
 **Date query flexibility** (`meetings month`/`week`):
 ```

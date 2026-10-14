@@ -14,6 +14,7 @@
 
 - 📋 **会议管理** - 查询、搜索、整理会议记录
 - 🤖 **AI 总结** - 智能会议总结和转写
+- 🎙️ **自动转写** - 检测云端新增录音，上传完成后提交转写与总结
 - 📁 **智能整理** - 自动分类会议到文件夹
 - ✅ **待办管理** - 管理和清理待办事项
 - 📱 **设备管理** - 管理绑定设备
@@ -143,7 +144,21 @@ lynse meetings transcript <ID>        # 获取完整转写
 lynse meetings transcript <ID> -o transcript.txt # 保存带时间戳的文本
 lynse meetings audio <ID>             # 获取音频下载信息
 lynse meetings summary <ID> -o summary.md # 保存 Markdown 正文
+lynse meetings transcribe <ID>        # 提交云端转写与总结（消耗账户额度）
+lynse meetings transcribe-status <ID>  # 查询转写任务进度
 ```
+
+### 自动转写新录音
+```bash
+python3 lynse.py meetings auto-transcribe --text         # 持续检测，每 60 秒扫描一次
+python3 lynse.py meetings auto-transcribe --once --json  # 单次扫描，可由定时任务重复调用
+```
+
+首次运行只建立基线，跳过已有录音；后续仅处理新增、上传完成且没有转写任务的云端音频。
+进程重启后复用状态文件去重；提交结果不明确时停止并提示核查，不自动重复扣费。
+默认状态保存在 `~/.lynse/auto-transcribe/`，按账户和 API 地址隔离。
+需要持续运行 CLI 或配置定时调用。此功能使用服务端现有的转写与总结流程及账户额度，
+不监控本地录音文件夹。详细选项和异常恢复见 [命令参考](references/commands.md)。
 
 ### 3. 自动整理
 ```bash

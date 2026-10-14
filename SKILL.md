@@ -102,6 +102,15 @@ precedence, account-owner checks, logout, or authentication troubleshooting.
 - **Summarize:** fetch existing summaries or transcript text before answering.
   Distinguish stored AI summaries from your own synthesis. Cite the meeting title,
   date, ID, and transcript timestamps when returned; do not invent links or times.
+- **Submit transcription:** `meetings transcribe` invokes the cloud transcription
+  and summary pipeline and may consume credits. `meetings transcribe-status`
+  checks task progress; submission success does not mean transcription is complete.
+  Use `meetings auto-transcribe` only when the user authorizes ongoing processing
+  of new cloud recordings. Its first scan skips all existing files. Reuse its state
+  file across runs; keep it running or arrange authorized repeated `--once` calls.
+  A request to add or inspect this feature does not authorize enabling it on the
+  user's account. Review `needsReview` outcomes before any explicit retry; see
+  [commands.md](references/commands.md) for persistence and recovery behavior.
 - **Manage todos, folders, or devices:** use the command reference to build the
   exact requested operation. Use fresh service data to resolve targets. Honor
   existing authorization for the same action, targets, and scope; ask only if a
