@@ -11,7 +11,7 @@ metadata:
   skillhubSlug: lynse
   displayName: 灵光记Lynse
   displayNameEn: Lynse CLI
-  version: 1.8.5
+  version: 1.8.6
   summary: 通过 Lynse / 灵光记 skill 可以非常方便地查询和调用灵光记上所有的音频文件、会议纪要和转写记录，所有用户数据都可以自己掌控。
   summaryEn: Easily query and access every audio file, meeting minute, and transcription on Lynse — all user data stays under your own control.
   openclaw:

@@ -72,7 +72,7 @@ except ImportError:
 
 
 # CLI 版本
-CLI_VERSION = '1.8.5'
+CLI_VERSION = '1.8.6'
 DEFAULT_API_HOST = 'https://api.lynse.cn'
 
 # Shared protocol contract: CLI and MCP adapters consume the same operation list.

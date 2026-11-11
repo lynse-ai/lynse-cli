@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.8.6 (2026-11-11)
+
+### New Features
+
+- Add recording mark commands: `meetings marks <id>` reads `recordMarks`, `recordMarkResults` and `markImages` from the file details, `meetings mark-images <md5>` lists the account's mark images for a recording MD5, and `meetings mark-image <image-id>` requests a temporary download URL for a private mark image (`--text` prints the URL alone).
+- Add `meetings summary --include-mind-map`: conclusions omit mind map content by default, which keeps responses small enough for agent contexts; pass the flag together with `--json` to retrieve `mindMapText`.
+- Add `usage summary|attempts|steps|jobs|orders`: query the lynclaw usage service configured through `LYNCLAW_API_URL`, binding the current Lynse token to this server first. Only trusted HTTPS endpoints (or loopback during development) are accepted, and each view has an explicit option whitelist.
+
+### Changed
+
+- `get_conclusion(..., include_mind_map=False)` now sends `includeMindMap=false` on the list request; callers that need mind maps must opt in.
+
 ## 1.8.5 (2026-10-02)
 
 ### New Features
