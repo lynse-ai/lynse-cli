@@ -370,20 +370,28 @@ class EmbeddingContractTests(unittest.TestCase):
 
         self.assertIsNone(result["data"])
 
-    def test_summary_alias_maps_all_flag_to_full_list(self):
-        calls = []
+    def test_summary_alias_controls_mind_map_independently_of_all(self):
+        api = self.make_api()
+        conclusions = [{"id": "summary-1"}, {"id": "summary-2"}]
+        response = {"code": 200, "data": conclusions}
 
-        class FakeApi:
-            def get_conclusion(self, file_id, first_only=True):
-                calls.append((file_id, first_only))
-                return {"code": 200}
+        for options, expected_data, include_mind_map in (
+            ([], conclusions[0], "false"),
+            (["--all"], conclusions, "false"),
+            (["--include-mind-map"], conclusions[0], "true"),
+            (["--all", "--include-mind-map"], conclusions, "true"),
+        ):
+            with self.subTest(options=options), patch.object(
+                api, "_request", return_value=response
+            ) as request:
+                result = lynse._ALIAS_HANDLERS["getConclusion"](api, ["meeting-1", *options])
 
-        lynse._ALIAS_HANDLERS["getConclusion"](FakeApi(), ["meeting-1"])
-        lynse._ALIAS_HANDLERS["getConclusion"](
-            FakeApi(), ["meeting-1", "--all"]
-        )
-
-        self.assertEqual(calls, [("meeting-1", True), ("meeting-1", False)])
+                request.assert_called_once_with(
+                    "GET",
+                    "/api/business/file/conclusion/list",
+                    params={"fileId": "meeting-1", "includeMindMap": include_mind_map},
+                )
+                self.assertEqual(result["data"], expected_data)
 
 
 if __name__ == "__main__":

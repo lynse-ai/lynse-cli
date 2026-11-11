@@ -110,7 +110,7 @@ lynse me
 lynse meetings list
 
 # 获取会议总结
-lynse meetings summary <会议ID>            # 默认返回第一篇；--all 返回全部总结
+lynse meetings summary <会议ID>            # 默认获取第一篇总结，省略思维导图内容
 
 # 整理会议到文件夹
 lynse meetings organize --execute
@@ -139,10 +139,14 @@ lynse meetings search 关键词 --from 2026-04-01 --to 2026-04-30
 ### 2. AI 智能功能
 ```bash
 lynse meetings summary <ID>            # 获取第一篇 AI 总结（--all 获取全部）
+lynse meetings summary <ID> --include-mind-map --json # 同时获取思维导图
 lynse meetings outline <ID>           # 获取会议大纲
 lynse meetings transcript <ID>        # 获取完整转写
 lynse meetings transcript <ID> -o transcript.txt # 保存带时间戳的文本
 lynse meetings audio <ID>             # 获取音频下载信息
+lynse meetings marks <ID>             # 获取录音标记和标记图片记录
+lynse meetings mark-images <MD5>       # 按录音 MD5 查询标记图片
+lynse meetings mark-image <图片ID> --text # 获取私有标记图片的临时访问链接
 lynse meetings summary <ID> -o summary.md # 保存 Markdown 正文
 lynse meetings transcribe <ID>        # 提交云端转写与总结（消耗账户额度）
 lynse meetings transcribe-status <ID>  # 查询转写任务进度

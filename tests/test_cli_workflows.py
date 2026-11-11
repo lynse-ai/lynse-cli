@@ -112,6 +112,30 @@ class OwnerBoundaryTests(unittest.TestCase):
 
 
 class RecordingOutputTests(unittest.TestCase):
+    def test_mark_commands_use_read_endpoints(self):
+        api = lynse.LynseAPI.__new__(lynse.LynseAPI)
+        image = {'imageId': 'image-1', 'timestamp': 2000, 'url': 'https://images.example.test/a.jpg'}
+        signed_url = image['url'] + '?Signature=temporary%2Bsignature'
+        mark = {'timeoffset': 2000, 'title': 'Decision', 'outline': None}
+        cases = (
+            ('marks', 'file-1', '/info', {'fileId': 'file-1'},
+             {'recordMarks': [2000], 'recordMarkResults': [mark], 'markImages': [image], 'id': 'file-1'},
+             {'recordMarks': [2000], 'recordMarkResults': [mark], 'markImages': [image]}),
+            ('marks', 'file-2', '/info', {'fileId': 'file-2'},
+             {'recordMarks': None},
+             {'recordMarks': [], 'recordMarkResults': [], 'markImages': []}),
+            ('mark-images', 'recording-md5', '/mark/image/list', {'md5': 'recording-md5'}, [image], [image]),
+            ('mark-image', 'image-1', '/mark/image/presign/download', {'imageId': 'image-1'}, signed_url, signed_url),
+        )
+        for subcommand, identifier, endpoint, params, payload, expected in cases:
+            with self.subTest(subcommand=subcommand, identifier=identifier), patch.object(
+                api, '_request', return_value={'code': 200, 'data': payload}
+            ) as request:
+                command, args, _ = lynse._resolve_alias('meetings', [subcommand, identifier])
+                result = lynse._ALIAS_HANDLERS[command](api, args)
+                self.assertEqual(result['data'], expected)
+                request.assert_called_once_with('GET', '/api/business/file' + endpoint, params=params)
+
     def test_summary_and_transcript_text_are_directly_readable(self):
         summary = lynse._format_text({'data': {'content': '# Decisions\n- Ship'}}, 'getConclusion')
         transcript = lynse._format_text({
@@ -158,7 +182,7 @@ class RecordingOutputTests(unittest.TestCase):
 
     def test_summary_output_file_contains_markdown_by_default(self):
         class FakeAPI:
-            def get_conclusion(self, _file_id, first_only=True):
+            def get_conclusion(self, _file_id, first_only=True, *, include_mind_map=True):
                 return {'code': 200, 'data': {'content': '# Decisions\n- Ship'}}
 
         with tempfile.TemporaryDirectory() as temp:

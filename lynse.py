@@ -143,6 +143,7 @@ _SIMPLE_ALIASES = {
 }
 
 _SUBCOMMAND_ALIASES = {
+    'usage': {'summary': 'usageSummary', 'attempts': 'usageAttempts', 'steps': 'usageSteps', 'jobs': 'usageJobs', 'orders': 'usageOrders'},
     'meetings': {
         'list': 'listFilesByTimeRange',
         'month': 'listFilesByMonth',
@@ -152,6 +153,9 @@ _SUBCOMMAND_ALIASES = {
         'transcript': 'getTranscriptionRecord',
         'transcript-text': 'getTranscriptionText',
         'audio': 'getAudioFile',
+        'marks': 'getRecordingMarks',
+        'mark-images': 'listMarkImages',
+        'mark-image': 'getMarkImageUrl',
         'summary': 'getConclusion',
         'info': 'getFileInfo',
         'outline': 'getOutline',
@@ -193,6 +197,11 @@ _SUBCOMMAND_ALIASES['meetings'].update({
 })
 
 _ALIAS_HANDLERS = {
+    'usageSummary': lambda api, a: _handle_usage_query(api, a),
+    'usageAttempts': lambda api, a: _handle_usage_query(api, a, 'attempts'),
+    'usageSteps': lambda api, a: _handle_usage_query(api, a, 'steps'),
+    'usageJobs': lambda api, a: _handle_usage_query(api, a, 'jobs'),
+    'usageOrders': lambda api, a: _handle_usage_query(api, a, 'orders'),
     'listFilesByTimeRange': lambda api, a: api.list_files_by_time_range(_extract_days(a)),
     'listFilesByMonth': lambda api, a: api.list_files_by_month(*_parse_month_args(a)),
     'listFilesByWeek': lambda api, a: api.list_files_by_week(*_parse_week_args(a)),
@@ -203,8 +212,13 @@ _ALIAS_HANDLERS = {
     'transcribeFile': lambda api, a: _handle_transcribe(api, a),
     'getTranscriptionStatus': lambda api, a: api.get_transcription_status(a) if a else _missing_arg('file ID(s)'),
     'getAudioFile': lambda api, a: api.get_audio_file(a[0]) if a else _missing_arg('file ID'),
+    'getRecordingMarks': lambda api, a: api.get_recording_marks(a[0]) if a else _missing_arg('file ID'),
+    'listMarkImages': lambda api, a: api.list_mark_images(a[0]) if a else _missing_arg('recording MD5'),
+    'getMarkImageUrl': lambda api, a: api.get_mark_image_url(a[0]) if a else _missing_arg('image ID'),
     'getConclusion': lambda api, a: api.get_conclusion(
-        a[0], first_only='--all' not in a[1:]
+        a[0],
+        first_only='--all' not in a[1:],
+        include_mind_map='--include-mind-map' in a[1:],
     ) if a else _missing_arg('file ID'),
     'getFileInfo': lambda api, a: api.get_file_info(a[0]) if a else _missing_arg('file ID'),
     'getOutline': lambda api, a: api.get_outline(a[0]) if a else _missing_arg('file ID'),
@@ -239,6 +253,9 @@ _ALIAS_INFO = {
     'getTranscriptionStatus': 'meetings transcribe-status',
     'autoTranscribe': 'meetings auto-transcribe',
     'getAudioFile': 'meetings audio',
+    'getRecordingMarks': 'meetings marks',
+    'listMarkImages': 'meetings mark-images',
+    'getMarkImageUrl': 'meetings mark-image',
     'getConclusion': 'meetings summary',
     'getFileInfo': 'meetings info',
     'getOutline': 'meetings outline',
@@ -802,6 +819,41 @@ def _handle_auto_transcribe(api, args: list, flags: dict):
         print('Auto-transcribe stopped.', file=sys.stderr)
 
 
+def _handle_usage_query(api, args, view="summary"):
+    """Query the configured lynclaw service with the current Lynse identity."""
+    base = os.environ.get("LYNCLAW_API_URL", "").rstrip("/")
+    parsed = urlsplit(base)
+    if (parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"})) or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise LynseAPIError("Configure a trusted HTTPS LYNCLAW_API_URL (or a loopback development URL)")
+    allowed = {"summary": {"--since", "--until", "--feature", "--model"},
+               "attempts": {"--feature", "--model", "--job-id", "--limit", "--offset"},
+               "steps": {"--feature", "--job-id", "--limit", "--offset"},
+               "jobs": {"--feature", "--limit", "--offset"},
+               "orders": {"--job-id", "--limit", "--offset"}}[view]
+    params = {}
+    if len(args) % 2:
+        raise LynseAPIError("Usage options require a value")
+    for flag, value in zip(args[::2], args[1::2]):
+        if flag not in allowed:
+            raise LynseAPIError("Unknown usage query option")
+        params[flag[2:].replace("-", "_")] = value
+    headers = {"Authorization": api._get_token()}
+    try:
+        binding = api._http.request("POST", base + "/api/session/backend", headers=headers,
+                                    json={"host": api.api_host}, timeout=15, allow_redirects=False)
+        if binding.status_code != 200:
+            raise LynseAPIError("Usage service could not verify this Lynse server", http_code=binding.status_code)
+        response = api._http.request("GET", base + "/api/usage/" + view, headers=headers,
+                                     params=params, timeout=30, allow_redirects=False)
+        if response.status_code != 200:
+            raise LynseAPIError("Usage query unavailable", http_code=response.status_code)
+        return response.json()
+    except LynseAPIError:
+        raise
+    except Exception:
+        raise LynseAPIError("Usage service unavailable") from None
+
+
 def _resolve_alias(command: str, args: list):
     """将友好命令别名解析为内部命令名。返回 (canonical, modified_args, is_alias)。"""
     if command in _SIMPLE_ALIASES:
@@ -1189,6 +1241,10 @@ def _format_text(result: dict, command: str) -> str:
         if isinstance(data, list):
             return '\n\n'.join(_summary_content(c) for c in data)
         return _summary_content(data)
+    if command in ('getRecordingMarks', 'listMarkImages'):
+        return json.dumps(data, ensure_ascii=False, indent=2)
+    if command == 'getMarkImageUrl':
+        return data
     if command == 'getTranscriptionRecord':
         return _transcription_entries_to_text(data)
     if command == 'getTranscriptionText':
@@ -2380,6 +2436,39 @@ class LynseAPI:
         return self._request('GET', '/api/business/file/info',
                             params={'fileId': safe_id})
 
+    def get_recording_marks(self, file_id: str) -> Dict[str, Any]:
+        """Read playback offsets, text marks and image records from the file details."""
+        response = self.get_file_info(file_id)
+        detail = response.get('data')
+        if not isinstance(detail, dict):
+            raise LynseAPIError('Lynse did not return recording details.')
+        marks = {}
+        for field in ('recordMarks', 'recordMarkResults', 'markImages'):
+            value = detail.get(field)
+            marks[field] = value if isinstance(value, list) else []
+        return {**response, 'data': marks}
+
+    def list_mark_images(self, md5: str) -> Dict[str, Any]:
+        """List the current account's mark images for a recording MD5."""
+        md5 = md5.strip()
+        if not md5:
+            raise LynseAPIError('A recording MD5 is required.')
+        return self._request('GET', '/api/business/file/mark/image/list', params={'md5': md5})
+
+    def get_mark_image_url(self, image_id: str) -> Dict[str, Any]:
+        """Request a temporary GET URL for a recording mark image."""
+        safe_id = self._sanitize_param(image_id.strip(), 'safe')
+        if not safe_id.strip():
+            raise LynseAPIError('An image ID is required.')
+        response = self._request(
+            'GET', '/api/business/file/mark/image/presign/download',
+            params={'imageId': safe_id},
+        )
+        url = response.get('data')
+        if not isinstance(url, str) or not url.strip():
+            raise LynseAPIError('Lynse did not return a download URL for this mark image.')
+        return response
+
     def get_audio_file(self, file_id: str) -> Dict[str, Any]:
         """Return a meeting audio download URL and normalized file metadata."""
         safe_id = self._sanitize_param(file_id, 'safe')
@@ -2445,13 +2534,17 @@ class LynseAPI:
             },
         }
 
-    def get_conclusion(self, file_id: str, first_only: bool = True) -> Dict[str, Any]:
+    def get_conclusion(self, file_id: str, first_only: bool = True, *,
+                       include_mind_map: bool = True) -> Dict[str, Any]:
         """获取文件总结；默认仅返回服务端列表中的第一篇。"""
         safe_id = self._sanitize_param(file_id, 'safe')
         response = self._request(
             'GET',
             '/api/business/file/conclusion/list',
-            params={'fileId': safe_id},
+            params={
+                'fileId': safe_id,
+                'includeMindMap': 'true' if include_mind_map else 'false',
+            },
         )
         if not first_only or not isinstance(response, dict):
             return response
@@ -3276,6 +3369,7 @@ def _print_help():
     print()
     sections = [
         ("Quick Commands", [
+            ("usage summary|attempts|steps|jobs|orders", "Read lynclaw usage and shadow billing (LYNCLAW_API_URL)"),
             ("me", "Show current user info"),
             ("meetings list [--days N]", "List recent meetings (past N days)"),
             ("meetings month <YYYY-MM>", "List meetings in a specific month"),
@@ -3288,7 +3382,11 @@ def _print_help():
             ("meetings transcribe-status <ids...>", "Get transcription task status"),
             ("meetings auto-transcribe [--once]", "Watch new cloud recordings; first scan skips existing files"),
             ("meetings audio <id>", "Get meeting audio download metadata"),
-            ("meetings summary <id> [--all]", "Get first AI summary (or all with --all)"),
+            ("meetings marks <id>", "Get recording marks and image records"),
+            ("meetings mark-images <md5>", "List mark images by recording MD5"),
+            ("meetings mark-image <image-id>", "Get a temporary mark image download URL"),
+            ("meetings summary <id> [--all] [--include-mind-map]",
+             "Get the first summary (all with --all). Use --include-mind-map with --json to get mind maps."),
             ("meetings outline <id>", "Get meeting outline"),
             ("meetings info <id>", "Get meeting details"),
             ("meetings organize [--execute] [--yes]", "Auto-classify meetings into folders (dry-run by default)"),

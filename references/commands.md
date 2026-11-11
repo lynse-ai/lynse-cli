@@ -19,7 +19,10 @@ python3 lynse.py meetings transcribe <id> [--template ID] [--model ID] [--langua
 python3 lynse.py meetings transcribe-status <ids...>   # Query status for 1-100 file IDs
 python3 lynse.py meetings auto-transcribe [--once] [--interval 60] [--state-file PATH] [--template ID] [--model ID] [--language ID]  # Watch new cloud audio recordings
 python3 lynse.py meetings audio <id>                   # Get audio download metadata
-python3 lynse.py meetings summary <id> [--all]         # Get first AI summary; --all returns every summary
+python3 lynse.py meetings marks <id>                   # Get recording marks and image records
+python3 lynse.py meetings mark-images <md5>            # List mark images by recording MD5
+python3 lynse.py meetings mark-image <image-id>        # Get a temporary image URL
+python3 lynse.py meetings summary <id> [--all] [--include-mind-map]  # Get the first AI summary or all with --all
 python3 lynse.py meetings outline <id>                 # Get outline
 python3 lynse.py meetings info <id>                    # Meeting details
 python3 lynse.py meetings organize [--days N] [--execute] [--yes]   # Auto-classify meetings into folders (dry-run by default; --execute applies)
@@ -39,6 +42,13 @@ python3 lynse.py devices list                          # List bound devices
 python3 lynse.py devices info <id>                     # Device details
 python3 lynse.py devices unbind <id>                   # Unbind device
 ```
+
+Summary requests omit mind map content by default. Use `--include-mind-map --json` to retrieve `mindMapText`.
+
+`meetings marks` returns `recordMarks`, `recordMarkResults`, and `markImages`.
+Use `meetings mark-images <md5>` to find image records when you only have the recording's MD5.
+For a private image, pass its `imageId` to `meetings mark-image`.
+Use `--text` for the URL alone and request a fresh URL after it expires.
 
 Todo deadlines use `YYYY-MM-DD HH:MM:SS`; `todos range` also accepts date-only bounds (the end bound is exclusive and expands to the next day 00:00:00). `todos add` inherits the cloud-sync marker of the linked file server-side when `--file` is given; `--sync 0` marks a todo offline-only.
 
