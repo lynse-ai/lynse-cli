@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.8.7 (2026-11-18)
+
+### Security
+
+- Bind API keys to their configured Lynse origin and clear the configured token cache on logout.
+- Restrict self-updates to the official npm package, verify SHA-512 integrity, and reject invalid options, redirects, and unexpected archive paths.
+- Require Requests 2.33.0 and urllib3 2.8.0 or newer for network commands.
+
+### Fixed
+
+- Make command and subcommand help available offline without credentials or HTTP dependencies. Preserve option-like text passed as a todo value.
+- Document WorkBuddy authentication and error recovery through the bundled CLI. Remove internal endpoint and header examples from the skill references.
+
+### Changed
+
+- Require the preview's `plan_id` for non-interactive meeting organization. Reject changed plans before writing and read back folder assignments before reporting successful moves.
+- Use `folders delete <ids> --check` to inspect folder emptiness. Actual deletion requires an atomic empty-folder operation on the service.
+
 ## 1.8.6 (2026-11-11)
 
 ### New Features

@@ -5,9 +5,14 @@ Covers the pure classification/plan logic (no network) and the
 the non-TTY safety gate), using the `__new__` + fake-method pattern.
 """
 
+import contextlib
+import io
+import json
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
+import lynse
 from lynse import (
     LynseAPI,
     _classify_meeting_title,
@@ -150,6 +155,8 @@ class ExtractFolderIdTests(unittest.TestCase):
 class OrganizeMeetingsTests(unittest.TestCase):
     def setUp(self):
         self.api = LynseAPI.__new__(LynseAPI)
+        self.api.api_host = lynse.DEFAULT_API_HOST
+        self.api.get_current_customer = lambda: {"data": {"id": "owner-1"}}
         self.calls = {"create": [], "change": []}
 
     def _wire(self, meetings, folders):
@@ -162,7 +169,10 @@ class OrganizeMeetingsTests(unittest.TestCase):
 
         def fake_change(payload):
             self.calls["change"].append(payload)
-            return {"code": 200}
+            for meeting in meetings:
+                if meeting["id"] in payload["fileIds"]:
+                    meeting["folderId"] = payload["newFolderId"]
+            return {"code": 200, "data": True}
 
         self.api.create_folder = fake_create
         self.api.change_folder = fake_change
@@ -174,6 +184,53 @@ class OrganizeMeetingsTests(unittest.TestCase):
         self.assertEqual(result["mode"], "plan")
         self.assertEqual(self.calls["create"], [])
         self.assertEqual(self.calls["change"], [])
+
+    def test_90_day_window_only_moves_records_with_matching_dates(self):
+        now = datetime.now(timezone.utc)
+        recent = (now - timedelta(days=1)).isoformat()
+        records = [
+            {**_meeting("recent", "产品：x"), "recordStartTime": recent},
+            {**_meeting("from-create", "产品：y"), "recordStartTime": "", "createTime": recent},
+            {**_meeting("old", "产品：old"), "recordStartTime": (now - timedelta(days=91)).isoformat()},
+            {**_meeting("future", "产品：future"), "recordStartTime": (now + timedelta(days=1)).isoformat()},
+            {**_meeting("undated", "产品：z"), "recordStartTime": "unknown"},
+        ]
+        self._wire(records, [])
+        plan = self.api.organize_meetings(days=90)
+        self.assertEqual(plan["scope"]["days"], 90)
+        self.assertEqual(plan["scope"]["skipped_unknown_date"], 1)
+        self.assertEqual(plan["folders"][0]["meeting_ids"], ["recent", "from-create"])
+        self.assertEqual(self.calls, {"create": [], "change": []})
+
+        result = self.api.organize_meetings(days=90, execute=True, yes=True, plan_id=plan["plan_id"])
+        self.assertEqual(result["results"]["moves_succeeded"], 2)
+        self.assertEqual(self.calls["change"][0]["fileIds"], ["recent", "from-create"])
+
+    def test_changed_scope_rejects_the_approved_plan_before_writes(self):
+        meetings = [_meeting("m1", "产品：x", folder_id="original")]
+        self._wire(meetings, [])
+        approved = self.api.organize_meetings()["plan_id"]
+        meetings[0]["folderId"] = "changed"
+        with self.assertRaisesRegex(lynse.LynseAPIError, "plan has changed"):
+            self.api.organize_meetings(execute=True, yes=True, plan_id=approved)
+        self.assertEqual(self.calls, {"create": [], "change": []})
+
+    def test_reports_only_moves_verified_by_receipt_and_readback(self):
+        self._wire([_meeting("m1", "产品：x")], [{"id": "target", "folderName": "产品"}])
+        approved = self.api.organize_meetings()["plan_id"]
+        for receipt in ({"code": 200, "data": False}, {"code": 200, "data": True}):
+            with self.subTest(receipt=receipt), mock.patch.object(self.api, "change_folder", return_value=receipt):
+                result = self.api.organize_meetings(execute=True, yes=True, plan_id=approved)
+                self.assertEqual(result["code"], 500)
+                self.assertEqual(result["results"]["moves_succeeded"], 0)
+                self.assertEqual(result["results"]["errors"][0]["meeting_id"], "m1")
+
+    def test_invalid_day_counts_are_rejected_before_reading_files(self):
+        self.api.list_files_paged = mock.Mock()
+        for days in (0, -1, 10**9):
+            with self.subTest(days=days), self.assertRaisesRegex(lynse.LynseAPIError, "positive integer"):
+                self.api.organize_meetings(days=days)
+        self.api.list_files_paged.assert_not_called()
 
     def test_execute_yes_creates_and_moves_with_chunking(self):
         # 60 product meetings -> must be chunked (>50) into >=2 change_folder calls
@@ -204,7 +261,16 @@ class OrganizeMeetingsTests(unittest.TestCase):
         # confirm the failure is reported (not swallowed) and no move happens.
         self._wire([_meeting("m1", "战略：投资讨论")], [])
         self.api.create_folder = lambda payload: (_ for _ in ()).throw(RuntimeError("server 503"))
-        result = self.api.organize_meetings(execute=True, yes=True)
+        approved = self.api.organize_meetings()["plan_id"]
+        args = ["lynse", "meetings", "organize", "--execute", "--yes", "--plan-id", approved, "--json"]
+        output = io.StringIO()
+        with mock.patch.object(lynse.sys, "argv", args), \
+                mock.patch.object(lynse, "LynseAPI", return_value=self.api), \
+                mock.patch.object(lynse, "_maybe_print_update_notice"), \
+                contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as failure:
+            lynse.main()
+        self.assertEqual(failure.exception.code, lynse.EXIT_SERVER)
+        result = json.loads(output.getvalue())
         self.assertEqual(result["mode"], "execute")
         self.assertEqual(result["results"]["folders_created"], [])
         self.assertTrue(result["results"]["folders_failed"])

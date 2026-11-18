@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from lynse import LynseAPI, _write_user_config
+from lynse import DEFAULT_API_HOST, LynseAPI, LynseAPIError, _write_user_config
 
 
 _ENV_KEYS = (
@@ -26,8 +26,7 @@ _ENV_KEYS = (
 
 class CredentialResolutionTests(unittest.TestCase):
     def setUp(self):
-        # Snapshot and clear env so each test controls its own inputs. The
-        # resolver loads the install .env into os.environ, so we must isolate.
+        # Snapshot and clear credentials from the caller's environment.
         self._saved = {k: os.environ.get(k) for k in _ENV_KEYS}
         for k in _ENV_KEYS:
             os.environ.pop(k, None)
@@ -39,9 +38,9 @@ class CredentialResolutionTests(unittest.TestCase):
             else:
                 os.environ.pop(k, None)
 
-    def _env_file(self, key, host="https://api.example.com"):
+    def _env_file(self, key, host="https://api.example.com", owner_id="legacy-owner"):
         f = tempfile.NamedTemporaryFile("w", suffix=".env", delete=False)
-        f.write(f"LYNSE_API_KEY={key}\nLYNSE_API_HOST={host}\n")
+        f.write(f"LYNSE_API_KEY={key}\nLYNSE_API_HOST={host}\nLYNSE_OWNER_ID={owner_id}\n")
         f.close()
         self.addCleanup(os.unlink, f.name)
         return f.name
@@ -79,11 +78,32 @@ class CredentialResolutionTests(unittest.TestCase):
         m_ucfg.return_value = {"api_key": "dk_VALID_user_key_9999"}
         env_path = self._env_file("dk_STALE_install_key_0000")
         os.environ["LYNSE_API_KEY"] = "dk_SHELL_key_5555"
-        os.environ["LYNSE_API_HOST"] = "https://api.example.com"
+        os.environ["LYNSE_API_HOST"] = "https://shell.example.com"
+        os.environ["LYNSE_OWNER_ID"] = "shell-owner"
 
+        for _ in range(2):
+            api = LynseAPI(config_file=env_path)
+            self.assertEqual(api.api_key, "dk_SHELL_key_5555")
+            self.assertEqual(api.api_host, "https://shell.example.com")
+            self.assertEqual(api.owner_id, "shell-owner")
+
+    @mock.patch("lynse._load_user_config", return_value={
+        "api_key": "dk_saved", "api_host": "https://original.example.com",
+    })
+    def test_host_override_requires_credentials_for_that_origin(self, _load):
+        with mock.patch.dict(os.environ, {"LYNSE_API_HOST": "https://alternate.example.com"}):
+            with self.assertRaisesRegex(LynseAPIError, "different Lynse origin"):
+                LynseAPI()
+        with mock.patch.dict(os.environ, {"LYNSE_API_HOST": "https://ORIGINAL.example.com:443/"}):
+            api = LynseAPI()
+            self.assertEqual(api.api_host, "https://original.example.com")
+
+    @mock.patch("lynse._load_user_config", return_value={"api_key": "dk_saved"})
+    def test_hostless_saved_key_uses_production_even_with_legacy_install_host(self, _load):
+        env_path = self._env_file("dk_install", host="https://legacy.example.com")
         api = LynseAPI(config_file=env_path)
-
-        self.assertEqual(api.api_key, "dk_SHELL_key_5555")
+        self.assertEqual(api.api_host, DEFAULT_API_HOST)
+        self.assertEqual(api.api_key, "dk_saved")
 
     @mock.patch("lynse._load_user_config")
     def test_install_env_used_when_no_user_config(self, m_ucfg):
@@ -94,6 +114,8 @@ class CredentialResolutionTests(unittest.TestCase):
         api = LynseAPI(config_file=env_path)
 
         self.assertEqual(api.api_key, "dk_ONLY_env_key_7777")
+        self.assertEqual(api.owner_id, "legacy-owner")
+        self.assertNotIn("LYNSE_API_KEY", os.environ)
 
     @mock.patch("lynse._load_user_config")
     def test_resolver_reports_config_source(self, m_ucfg):
@@ -121,6 +143,29 @@ class CredentialResolutionTests(unittest.TestCase):
 
             self.assertEqual(written, config_file)
             self.assertEqual(config_file.stat().st_mode & 0o777, 0o600)
+
+    def test_token_cache_is_used_only_for_the_same_key_and_host(self):
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch("lynse._get_user_config_dir", return_value=Path(tmpdir)), \
+                mock.patch("lynse._load_install_env", return_value={}):
+            original = LynseAPI(api_host="https://one.example.com", api_key="dk_original")
+            original._save_token("aaa.bbb.ccc")
+            for host, key, expected in (
+                ("https://one.example.com", "dk_original", "aaa.bbb.ccc"),
+                ("https://one.example.com", "dk_new", None),
+                ("https://two.example.com", "dk_original", None),
+            ):
+                with self.subTest(host=host, key=key):
+                    api = LynseAPI(api_host=host, api_key=key)
+                    self.assertEqual(api._get_cached_token(), expected)
+
+            original.token_file.write_text("legacy.saved.token", encoding="utf-8")
+            with mock.patch.object(original, "_refresh_token", return_value="new.saved.token") as refresh, \
+                    mock.patch("lynse.requests.get") as probe:
+                self.assertEqual(original._get_token(), "new.saved.token")
+                refresh.assert_called_once()
+                probe.assert_not_called()
+                self.assertEqual(original._get_cached_token(), "new.saved.token")
 
 
 if __name__ == "__main__":

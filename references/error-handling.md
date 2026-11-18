@@ -1,22 +1,16 @@
 # Error Handling
 
-## Error Response Format
+Read the CLI exit status, stderr, and any JSON it returned. Use the bundled CLI
+for recovery.
 
-```json
-{"code": 403, "message": "error details", "data": null}
-```
-
-## HTTP / Business Error Mapping
-
-| Scenario | HTTP Code | Action |
-|----------|-----------|--------|
-| Token expired | 401 | Auto-refresh and retry safe reads once when an API Key is available; do not resubmit writes automatically. |
-| Insufficient permissions | 403 | "Insufficient permissions. Contact admin to upgrade." |
-| Rate limited | 429 | Retry reads with a short backoff; report writes for manual review. |
-| Not found | 404 | "Resource not found." |
-| Server error | 500/502/503 | Retry safe reads; report writes, including writes exposed as GET endpoints, without automatic retry. |
-| Token refresh failed | — | For rejected credentials (401/403), ask the user to check their key privately. For 429/5xx/network errors, report a transient auth-service failure; do not label the key invalid. |
-| Business error (code != 200) | — | Show error message with possible cause and fix |
+| Exit | Meaning | Recovery |
+|------|---------|----------|
+| 0 | Success | Check result fields for completed writes, including move counts and errors in an organize result. |
+| 1 | Invalid input or local error | Inspect `help` or the command's `--help` offline and correct the invocation. |
+| 2 | Authentication required or expired | Run `auth status --json`. Configure a missing or rejected key privately with `auth login` or the host's credential injection, then retry the original operation. |
+| 3 / 4 | Connection error or timeout | Check connectivity. After a write request, verify the service state before retrying. |
+| 5 | Permission denied | Verify the account and ask the administrator for the required access. If the error specifically says the key was rejected, check the key privately. |
+| 6 | Service rejected the request or returned an error | Use the CLI message to identify the cause. The CLI already retries safe reads on transient errors. Inspect state before retrying any write. |
 
 ## Reporting Errors to Users
 

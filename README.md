@@ -93,6 +93,16 @@ Codex 会从实际加载的 skill 路径定位 CLI，不依赖当前工作目录
 `.agents/skills/lynse-cli/`。插件和普通 skill 选择一种启用，避免同名副本重复出现。
 源文件改动后需重新构建并刷新插件；不要在插件缓存内运行 CLI 的 `update`。
 
+### WorkBuddy 技能包
+
+```bash
+python3 scripts/build_skill_package.py --workbuddy
+```
+
+构建结果在 `dist/lynse-cli-skill-workbuddy.zip`。安装后可离线运行
+`python3 lynse.py meetings organize --help`。预览归档计划需要在运行 CLI 的
+环境中配置灵光记凭据，并安装包内 `requirements.txt` 的依赖。
+
 ### 配置
 
 ```bash
@@ -112,8 +122,8 @@ lynse meetings list
 # 获取会议总结
 lynse meetings summary <会议ID>            # 默认获取第一篇总结，省略思维导图内容
 
-# 整理会议到文件夹
-lynse meetings organize --execute
+# 预览最近 90 天的会议归档计划
+lynse meetings organize --days 90
 
 # 管理待办事项
 lynse todos list
@@ -166,8 +176,9 @@ python3 lynse.py meetings auto-transcribe --once --json  # 单次扫描，可由
 
 ### 3. 自动整理
 ```bash
-lynse meetings organize                # 预览整理计划
-lynse meetings organize --execute      # 执行整理
+lynse meetings organize --days 90 --json                                # 预览并获取 plan_id
+lynse meetings organize --days 90 --execute --yes --plan-id PLAN_ID      # 应用已授权的预览
+lynse folders delete FOLDER_ID --check                                  # 检查当前是否为空
 ```
 
 ### 4. 待办管理

@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lynse-cli"
-version = "1.8.6"
+version = "1.8.7"
 description = "Lynse API client and cross-platform command line skill"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "requests>=2.28.0",
+  "requests>=2.33.0,<3",
+  "urllib3>=2.8.0,<3",
 ]
 
 [project.scripts]

@@ -1,4 +1,6 @@
+import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -7,6 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import lynse
@@ -21,6 +24,21 @@ def _make_tgz(members: dict) -> bytes:
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
     return buffer.getvalue()
+
+
+def _release(payload: bytes, version: str = "9.9.9") -> dict:
+    integrity = base64.b64encode(hashlib.sha512(payload).digest()).decode()
+    return {
+        "version": version,
+        "tarball": f"https://registry.npmjs.org/@lynse.ai/lynse-cli/-/lynse-cli-{version}.tgz",
+        "integrity": f"sha512-{integrity}",
+    }
+
+
+def _download(payload: bytes, status_code: int = 200):
+    return contextlib.nullcontext(SimpleNamespace(
+        status_code=status_code, iter_content=lambda **_kwargs: [payload],
+    ))
 
 
 class VersionCompareTests(unittest.TestCase):
@@ -87,29 +105,33 @@ class UpdateStateTests(unittest.TestCase):
 
 
 class FetchNpmReleaseTests(unittest.TestCase):
-    def test_rejects_non_https_tarball(self):
-        class FakeResp:
-            def raise_for_status(self):
-                pass
-
-            def json(self):
-                return {"version": "2.0.0", "dist": {"tarball": "http://evil.example/x.tgz"}}
-
-        with patch.object(lynse.requests, "get", return_value=FakeResp()):
-            with self.assertRaises(lynse.LynseAPIError):
+    def test_rejects_tarball_outside_the_official_registry(self):
+        release = _release(b"fixture")
+        release["tarball"] = "https://example.test/lynse-cli.tgz"
+        response = SimpleNamespace(status_code=200, json=lambda: {
+            "name": lynse.NPM_PACKAGE, "version": release["version"], "dist": release,
+        })
+        with patch.object(lynse.requests, "get", return_value=response) as fetch:
+            with self.assertRaisesRegex(lynse.LynseAPIError, "official npm package URL"):
                 lynse._fetch_npm_release()
+        self.assertFalse(fetch.call_args.kwargs["allow_redirects"])
 
     def test_rejects_malformed_metadata(self):
-        class FakeResp:
-            def raise_for_status(self):
-                pass
-
-            def json(self):
-                return {"unexpected": True}
-
-        with patch.object(lynse.requests, "get", return_value=FakeResp()):
+        response = SimpleNamespace(status_code=200, json=lambda: {"unexpected": True})
+        with patch.object(lynse.requests, "get", return_value=response):
             with self.assertRaises(lynse.LynseAPIError):
                 lynse._fetch_npm_release()
+
+    def test_unknown_update_flags_fail_before_any_registry_call(self):
+        with patch.object(lynse.sys, "argv", ["lynse", "update", "--check-only"]), \
+                patch.object(lynse, "_check_npm_for_update") as check, \
+                patch.object(lynse, "_apply_self_update") as update, \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as failure:
+                lynse.main()
+        self.assertEqual(failure.exception.code, lynse.EXIT_INVALID)
+        check.assert_not_called()
+        update.assert_not_called()
 
 
 class TarballExtractionTests(unittest.TestCase):
@@ -135,6 +157,7 @@ class TarballExtractionTests(unittest.TestCase):
             "package/references/../../evil.md": b"evil",
             "/package/absolute.md": b"evil",
             "./package/./SKILL.md": b"ok",
+            r"package/references\commands.md": b"unsupported archive path",
         })
         files = lynse._extract_skill_files(payload)
         self.assertEqual(set(files), {"lynse.py", "SKILL.md"})
@@ -156,23 +179,16 @@ class SelfUpdateTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_apply_replaces_files_and_keeps_backup(self):
-        payload = _make_tgz({
+        files = {f"package/{path}": b"new file" for path in lynse.UPDATE_SKILL_FILES}
+        files.update({
             "package/lynse.py": b"NEW",
             "package/SKILL.md": b"# new skill",
             "package/references/error-handling.md": b"errors",
         })
-
-        class FakeResp:
-            status_code = 200
-            content = payload
-
-            def raise_for_status(self):
-                pass
-
-        with patch.object(lynse.requests, "get", return_value=FakeResp()):
-            result = lynse._apply_self_update(
-                {"version": "9.9.9", "tarball": "https://registry.npmjs.org/x/-/x-9.9.9.tgz"}
-            )
+        payload = _make_tgz(files)
+        with patch.object(lynse.requests, "get", return_value=_download(payload)) as download:
+            result = lynse._apply_self_update(_release(payload))
+        self.assertFalse(download.call_args.kwargs["allow_redirects"])
         self.assertEqual((self.skill_dir / "lynse.py").read_bytes(), b"NEW")
         self.assertEqual((self.skill_dir / "SKILL.md").read_bytes(), b"# new skill")
         self.assertEqual(
@@ -181,6 +197,36 @@ class SelfUpdateTests(unittest.TestCase):
         self.assertEqual((self.skill_dir / "lynse.py.bak").read_bytes(), b"OLD")
         self.assertEqual(result["to_version"], "9.9.9")
         self.assertFalse(list(self.skill_dir.glob("*.tmp-update")))
+
+    def test_integrity_failure_prevents_all_file_replacements(self):
+        release = _release(b"original fixture")
+        with patch.object(lynse.requests, "get", return_value=_download(b"different fixture")):
+            with self.assertRaisesRegex(lynse.LynseAPIError, "SHA-512"):
+                lynse._apply_self_update(release)
+        self.assertEqual((self.skill_dir / "lynse.py").read_bytes(), b"OLD")
+        self.assertFalse((self.skill_dir / "lynse.py.bak").exists())
+
+    def test_redirect_during_download_does_not_replace_files(self):
+        with patch.object(lynse.requests, "get", return_value=_download(b"", status_code=302)):
+            with self.assertRaisesRegex(lynse.LynseAPIError, "Could not download"):
+                lynse._apply_self_update(_release(b"fixture"))
+        self.assertEqual((self.skill_dir / "lynse.py").read_bytes(), b"OLD")
+
+    def test_failed_replacement_restores_files_installed_earlier(self):
+        payload = _make_tgz({f"package/{path}": b"NEW" for path in lynse.UPDATE_SKILL_FILES})
+        replaced = os.replace
+
+        def fail_installing_requirements(source, target):
+            if Path(source).name.startswith("new-") and Path(target).name == "requirements.txt":
+                raise PermissionError("simulated replacement failure")
+            replaced(source, target)
+
+        with patch.object(lynse.requests, "get", return_value=_download(payload)), \
+                patch.object(lynse.os, "replace", side_effect=fail_installing_requirements):
+            with self.assertRaisesRegex(lynse.LynseAPIError, "failed while replacing files"):
+                lynse._apply_self_update(_release(payload))
+        self.assertEqual((self.skill_dir / "lynse.py").read_bytes(), b"OLD")
+        self.assertFalse((self.skill_dir / "SKILL.md").exists())
 
 
 if __name__ == "__main__":

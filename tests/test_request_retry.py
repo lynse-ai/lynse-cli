@@ -82,6 +82,15 @@ class RequestRetryTests(unittest.TestCase):
         self.assertEqual(m_req.call_count, 2)
 
     @mock.patch("lynse.requests.request")
+    def test_timeout_keeps_exit_code_without_echoing_exception_details(self, m_req):
+        m_req.side_effect = lynse.requests.Timeout("private request information")
+        with self.assertRaises(LynseAPIError) as failure:
+            self.api._request("POST", "/api/business/x")
+        self.assertEqual(lynse._resolve_exit_code(failure.exception), lynse.EXIT_TIMEOUT)
+        self.assertNotIn("private request information", str(failure.exception))
+        m_req.assert_called_once()
+
+    @mock.patch("lynse.requests.request")
     def test_write_401_is_not_resubmitted(self, m_req):
         m_req.return_value = FakeResp(401, text="expired")
         with self.assertRaises(LynseAPIError):
@@ -95,6 +104,14 @@ class RequestRetryTests(unittest.TestCase):
             self.api._request("GET", "/api/business/file/changeFolder",
                               params={"fileIds": "file-1"}, _retry_safe=False)
         self.assertEqual(m_req.call_count, 1)
+
+    @mock.patch("lynse.requests.request")
+    def test_authenticated_requests_stop_at_redirect(self, m_req):
+        m_req.return_value = FakeResp(302)
+        with self.assertRaisesRegex(LynseAPIError, "returned a redirect"):
+            self.api._request("GET", "/api/business/x")
+        m_req.assert_called_once()
+        self.assertFalse(m_req.call_args.kwargs["allow_redirects"])
 
     @mock.patch("lynse.requests.request")
     def test_does_not_retry_4xx(self, m_req):

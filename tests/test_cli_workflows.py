@@ -19,7 +19,7 @@ TOKEN = 'aaaa.bbbb.cccc'
 class LoginWorkflowTests(unittest.TestCase):
     def test_public_host_is_default_and_test_host_requires_override(self):
         self.assertEqual(lynse.DEFAULT_API_HOST, 'https://api.lynse.cn')
-        with patch.dict(os.environ, {}, clear=True), patch.object(lynse, '_load_install_env'):
+        with patch.dict(os.environ, {}, clear=True), patch.object(lynse, '_load_install_env', return_value={}):
             production = lynse.LynseAPI(api_key='dk_test')
             test = lynse.LynseAPI(api_key='dk_test', api_host='https://gapp.lynse.cn')
         self.assertEqual(production.api_host, 'https://api.lynse.cn')
@@ -38,14 +38,18 @@ class LoginWorkflowTests(unittest.TestCase):
             )
             with patch.dict(os.environ, {}, clear=True), \
                     patch.object(lynse, '_get_user_config_dir', return_value=config_dir), \
-                    patch.object(lynse, '_load_install_env'), \
+                    patch.object(lynse, '_load_install_env', return_value={}), \
                     patch.object(lynse.requests, 'post', return_value=response) as post, \
                     contextlib.redirect_stdout(io.StringIO()):
                 lynse._handle_auth_command('__auth_login__', ['--api-key', 'dk_test'], {'format': 'json'})
                 config = json.loads((config_dir / 'config.json').read_text())
                 self.assertEqual(config['api_key'], 'dk_test')
+                self.assertEqual(config['api_host'], lynse.DEFAULT_API_HOST)
                 self.assertNotIn('access_token', config)
-                self.assertEqual((config_dir / 'tokens.json').read_text(), TOKEN)
+                cached = json.loads((config_dir / 'tokens.json').read_text())
+                self.assertEqual(cached['token'], TOKEN)
+                self.assertEqual(cached['host'], lynse.DEFAULT_API_HOST)
+                self.assertNotIn('dk_test', json.dumps(cached))
                 self.assertEqual(post.call_args.args[0], lynse.DEFAULT_API_HOST + '/api/auth/apikey/token')
 
                 lynse._handle_auth_command('__auth_logout__', ['--tokens-only'], {'format': 'json'})
@@ -55,9 +59,38 @@ class LoginWorkflowTests(unittest.TestCase):
                 self.assertFalse((config_dir / 'tokens.json').exists())
 
     def test_plain_http_host_is_rejected_before_credentials_are_sent(self):
-        with patch.dict(os.environ, {}, clear=True), patch.object(lynse, '_load_install_env'):
+        with patch.dict(os.environ, {}, clear=True), patch.object(lynse, '_load_install_env', return_value={}):
             with self.assertRaisesRegex(lynse.LynseAPIError, 'HTTPS'):
                 lynse.LynseAPI(api_host='http://example.test', api_key='dk_test')
+
+    def test_logout_clears_the_configured_cache_and_preserves_unrelated_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cache = root / 'tokens-custom.json'
+            unrelated = root / 'document.json'
+            cache.write_text(TOKEN, encoding='utf-8')
+            unrelated.write_text('{}', encoding='utf-8')
+            with patch.dict(os.environ, {}, clear=True), \
+                    patch.object(lynse, '_get_user_config_dir', return_value=root / 'settings'), \
+                    patch.object(lynse, '__file__', str(root / 'lynse.py')), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with patch.dict(os.environ, {'LYNSE_TOKEN_FILE': str(cache)}):
+                    lynse._handle_auth_command('__auth_logout__', ['--tokens-only'], {'format': 'json'})
+                self.assertFalse(cache.exists())
+                with patch.dict(os.environ, {'LYNSE_TOKEN_FILE': str(unrelated)}):
+                    with self.assertRaisesRegex(lynse.LynseAPIError, 'does not contain a Lynse token cache'):
+                        lynse._handle_auth_command('__auth_logout__', ['--tokens-only'], {'format': 'json'})
+                self.assertTrue(unrelated.is_file())
+
+    def test_credential_paths_require_patched_http_dependencies(self):
+        with patch.object(lynse.urllib3, '__version__', '2.7.0'), \
+                patch.object(lynse.sys, 'argv', ['lynse', 'me']), \
+                patch.object(lynse, 'LynseAPI') as factory, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit) as failure:
+                lynse.main()
+        self.assertEqual(failure.exception.code, lynse.EXIT_INVALID)
+        self.assertIn('requirements.txt', stderr.getvalue())
+        factory.assert_not_called()
 
 
 class OwnerBoundaryTests(unittest.TestCase):
@@ -68,7 +101,7 @@ class OwnerBoundaryTests(unittest.TestCase):
                 status_code=200, text='{}', json=lambda: {'code': 200, 'data': []}
             ),
         )
-        with patch.dict(os.environ, {}, clear=True), patch.object(lynse, '_load_install_env'):
+        with patch.dict(os.environ, {}, clear=True), patch.object(lynse, '_load_install_env', return_value={}):
             api = lynse.LynseAPI(api_key='', access_token=TOKEN, owner_id='owner-1', http_client=http)
         return api, http
 
@@ -158,6 +191,16 @@ class RecordingOutputTests(unittest.TestCase):
         with patch.object(lynse.sys, 'stdout', SimpleNamespace(isatty=lambda: False)):
             flags, _ = lynse._parse_global_flags(['meetings', 'summary', 'file-1'])
             self.assertEqual(flags['format'], 'json')
+
+    def test_global_options_used_as_todo_content_are_literal(self):
+        for content in ('--help', '--json'):
+            with self.subTest(content=content), \
+                    patch.object(lynse.sys, 'argv', ['lynse', 'todos', 'add', '--content', content, '--json']), \
+                    patch.object(lynse, 'LynseAPI') as factory, patch.object(lynse, '_maybe_print_update_notice'), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                factory.return_value.insert_todos.return_value = {'code': 200}
+                lynse.main()
+                factory.return_value.insert_todos.assert_called_once_with([{'todoContent': content}])
 
     def test_date_filtered_search_keeps_pagination(self):
         api = lynse.LynseAPI.__new__(lynse.LynseAPI)

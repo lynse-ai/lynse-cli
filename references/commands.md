@@ -1,8 +1,9 @@
 # Command Reference
 
 Examples use `python3 lynse.py` for readability. Resolve `lynse.py` relative to the
-loaded `SKILL.md` and pass its quoted absolute path; use the interpreter selected
-in the entrypoint instructions. Run `help` if the installed command set differs.
+loaded `SKILL.md` and pass its quoted absolute path. Use the interpreter selected
+in the entrypoint instructions. Run `help`, `meetings --help`, or
+`meetings organize --help` to inspect the installed command set offline.
 
 ### Friendly Aliases (Preferred)
 
@@ -25,12 +26,12 @@ python3 lynse.py meetings mark-image <image-id>        # Get a temporary image U
 python3 lynse.py meetings summary <id> [--all] [--include-mind-map]  # Get the first AI summary or all with --all
 python3 lynse.py meetings outline <id>                 # Get outline
 python3 lynse.py meetings info <id>                    # Meeting details
-python3 lynse.py meetings organize [--days N] [--execute] [--yes]   # Auto-classify meetings into folders (dry-run by default; --execute applies)
+python3 lynse.py meetings organize [--days N] [--include-no-conclusion] [--execute [--yes --plan-id ID]]
 python3 lynse.py folders list                          # List folders/groups
 python3 lynse.py folders create <json>                 # Create folder
 python3 lynse.py folders move <json>                   # Move files to folder
 python3 lynse.py folders count                         # Count files by folder
-python3 lynse.py folders delete <ids>                  # Delete server-verified empty folders only
+python3 lynse.py folders delete <ids> --check          # Check current emptiness without writing
 python3 lynse.py todos list [all|open|done] [page] [size] # List todos; defaults to page 1, size 20
 python3 lynse.py todos add <content> [--file ID] [--deadline 'YYYY-MM-DD HH:MM:SS'] [--weight N] [--owner NAME] [--sync 0|1]  # Insert todo(s); repeat --content or pass a JSON array for batch (max 100)
 python3 lynse.py todos count                           # Deadline statistics: week/month/later/no-date/expired
@@ -111,10 +112,20 @@ python3 lynse.py meetings range 2026-04-01 2026-04-30   # Custom date range
 **Auto-organize meetings into folders** (`meetings organize`):
 ```
 python3 lynse.py meetings organize                       # Dry-run: print a folder plan, change nothing
-python3 lynse.py meetings organize --days 90             # Plan only for the last 90 days
-python3 lynse.py meetings organize --execute --yes       # Apply: create folders + move meetings (non-interactive)
+python3 lynse.py meetings organize --help
+python3 lynse.py meetings organize --days 90 --json
+python3 lynse.py meetings organize --days 90 --execute --yes --plan-id PLAN_ID --json
 ```
-Classifies meetings (with a summary) into topic folders by title, **reusing existing folders** where they match and creating new ones (icon + ≤6-char name) otherwise; caps at 10 folders + 🗂其他. Default is a safe **dry-run**. `--execute` applies changes; in a non-interactive/agent context it **requires `--yes`** (it refuses otherwise). Meetings without a summary are listed but not moved unless `--include-no-conclusion` is given.
+The preview reads the account's meetings and folders using configured credentials.
+The CLI classifies meetings by title and proposes reusing or creating folders.
+Use a positive integer for `--days`. It limits the plan to the requested rolling
+window and reports records with unknown dates in `scope.skipped_unknown_date`.
+Use `--include-no-conclusion` to move meetings that have no summary. After
+authorization, keep the same filters and pass the preview's `plan_id` with
+`--execute --yes --plan-id` for non-interactive execution. The CLI rejects changes
+to the approved plan and reads back the current folder assignments after writes.
+Exit 6 with an execution result indicates errors. Review
+`results.folders_failed`, `results.errors`, and move counts before retrying.
 
 **JSON mutations** (POSIX shell examples; keep each JSON payload one literal argument):
 ```bash
@@ -126,15 +137,14 @@ python3 lynse.py todos reschedule TODO_ID '2026-10-08 09:00:00' --json
 `todos update` is an alias of `reschedule` and accepts a JSON array of updates.
 Only supplied fields are changed; `expectedCompleteTime: null` clears a deadline.
 Use the selected shell's quoting rules on Windows, or pass an argument array when
-supported. An organization execution may return exit code 0 with per-item failures;
-inspect `results.folders_failed`, `results.errors`, and move counts before
-reporting full success.
+supported.
 
-**Folder deletion safety** (`folders delete`):
-- Every target ID must exist and be confirmed empty from fresh service data immediately before deletion.
-- Prefer `folderStats[].count == 0`. Because the service may omit empty folders from `folderStats`, an omitted target is checked against the complete paginated server file inventory; any matching `folderId` blocks deletion.
-- If any target is non-empty, unknown, has an invalid count, or cannot be verified, the entire batch is rejected and no `DELETE` request is sent.
-- Never infer emptiness from a local organization plan, cached folder state, or completed move records.
+**Folder emptiness check** (`folders delete <ids> --check`):
+The CLI confirms that each target exists and is currently empty. If the service
+omits a folder count, the CLI verifies the complete paginated file inventory.
+The check returns `mode: "check"` and `data.empty: true` when every target is
+verified empty. Actual deletion requires an atomic empty-folder operation on
+the service.
 
 ### Auth & System
 
@@ -152,6 +162,13 @@ python3 lynse.py update --check     # Report a newer npm version
 python3 lynse.py update             # Update a standalone install only when requested
 ```
 
+### Lynclaw usage
+
+`usage summary`, `usage attempts`, `usage steps`, `usage jobs`, and `usage orders`
+read records from the trusted service configured in `LYNCLAW_API_URL`. Each
+query sends the current account token to that service. Use the origin supplied
+by the user or administrator and run `usage --help` for the available filters.
+
 ### Output Format Control
 
 ```
@@ -167,5 +184,6 @@ Combine: `python3 lynse.py meetings list --table --output meetings.txt`
 
 For plugin installs, refresh the plugin through its marketplace; `update` is the
 standalone npm updater and does not refresh the plugin manifest or cached install.
-Use `LYNSE_NO_UPDATE_CHECK=1` for diagnostics that should stay offline. `doctor`
-and `auth doctor` can contact the configured host.
+Use `version --json` to check the installed HTTP dependencies and `auth status`
+to check local credential configuration. `doctor` and
+`auth doctor` can contact the configured host.

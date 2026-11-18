@@ -227,7 +227,7 @@ class AutoTranscriptionTests(unittest.TestCase):
     def test_concurrent_scan_is_rejected_before_submission(self):
         self.scan()
         self.files.append(recording('new-1'))
-        with lynse._auto_transcribe_lock(self.path):
+        with lynse._exclusive_file_lock(Path(str(self.path) + ".lock"), "Concurrent scan"):
             with self.assertRaisesRegex(lynse.LynseAPIError, 'Another'):
                 self.scan()
         self.api.transcribe_file.assert_not_called()

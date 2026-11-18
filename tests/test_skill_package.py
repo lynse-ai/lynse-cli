@@ -60,6 +60,7 @@ class SkillPackageTests(unittest.TestCase):
     def test_workbuddy_package_promotes_required_metadata(self):
         source = (SOURCE_ROOT / "SKILL.md").read_text(encoding="utf-8")
         version = re.search(r"(?m)^  version:[ \t]*(.+)$", source).group(1).strip()
+        package = json.loads((SOURCE_ROOT / "package.json").read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "workbuddy.zip"
             build_zip(output, workbuddy=True)
@@ -69,6 +70,13 @@ class SkillPackageTests(unittest.TestCase):
                     set(archive.namelist()),
                     {path.as_posix() for path in REQUIRED_FILES},
                 )
+                for name in archive.namelist():
+                    if name.endswith(".md"):
+                        with self.subTest(document=name):
+                            self.assertNotRegex(
+                                archive.read(name).decode("utf-8"),
+                                r"(?i)\bX-API-Key\b|/api/(?:auth|business|session|usage)/",
+                            )
 
         frontmatter = skill_md.split("---", 2)[1]
         self.assertIn(f"\nversion: {version}", frontmatter)
@@ -76,6 +84,10 @@ class SkillPackageTests(unittest.TestCase):
         self.assertIn("\ndisplay_name_en: Lynse CLI", frontmatter)
         self.assertIn("\ndescription_zh: ", frontmatter)
         self.assertIn("\ndescription_en: Easily query and access", frontmatter)
+        self.assertIn(f'\nauthor: {json.dumps(package["author"])}', frontmatter)
+        for path in REQUIRED_FILES:
+            if path.parent == Path("references"):
+                self.assertIn(f"\n@{path.as_posix()}", skill_md)
 
     def test_codex_marketplace_and_manifests_resolve_to_packaged_skill(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -117,15 +129,29 @@ class SkillPackageTests(unittest.TestCase):
     def test_all_extracted_variants_run_offline_from_unrelated_cwd(self):
         runner = """
 import runpy, socket, sys
+from pathlib import Path
+from unittest.mock import patch
+class NetworkAttempt(BaseException):
+    pass
 def deny_network(*args, **kwargs):
-    raise AssertionError("packaging smoke tests must not use the network")
+    raise NetworkAttempt("packaging smoke tests must not use the network")
+socket.getaddrinfo = deny_network
 socket.socket.connect = deny_network
 socket.create_connection = deny_network
-sys.argv = sys.argv[1:]
-runpy.run_path(sys.argv[0], run_name="__main__")
+config_home, sys.argv = Path(sys.argv[1]), sys.argv[2:]
+with patch.object(Path, "home", return_value=config_home):
+    runpy.run_path(sys.argv[0], run_name="__main__")
 """
         env = {key: value for key, value in os.environ.items() if not key.startswith("LYNSE_")}
-        env["LYNSE_NO_UPDATE_CHECK"] = "1"
+        local_commands = (
+            (["--help"], "lynse cli"),
+            (["meetings", "--help"], "meetings organize"),
+            (["meetings", "organize", "--help"], "--days 90"),
+            (["help", "meetings", "organize"], "--include-no-conclusion"),
+            (["auth", "logout", "-h"], "--tokens-only"),
+            (["version", "--json"], '"requests":"not installed"'),
+            (["auth", "status", "--json"], '"api_key":"(not set)"'),
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             cwd = root / "unrelated"
@@ -138,14 +164,26 @@ runpy.run_path(sys.argv[0], run_name="__main__")
                     with zipfile.ZipFile(output) as archive:
                         archive.extractall(extracted)
                     skill_root = extracted / "skills/lynse-cli" if variant == "codex" else extracted
-                    for command in ("help", "version"):
-                        result = subprocess.run(
-                            [sys.executable, "-c", runner, str(skill_root / "lynse.py"), command],
-                            cwd=cwd, env=env, capture_output=True, text=True, timeout=15,
-                        )
-                        self.assertEqual(result.returncode, 0, result.stderr)
-                        self.assertIn("lynse cli" if command == "help" else "lynse-cli", result.stdout.lower())
-                        self.assertFalse((skill_root / ".token_cache").exists())
+                    config_home = root / "empty-home"
+                    invocation = ["-c", runner, str(config_home), str(skill_root / "lynse.py")]
+                    for args, expected in local_commands:
+                        with self.subTest(command=args):
+                            result = subprocess.run(
+                                [sys.executable, "-I", "-S", *invocation, *args],
+                                cwd=cwd, env=env, capture_output=True, text=True, timeout=15,
+                            )
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertEqual(result.stderr, "")
+                            self.assertIn(expected, result.stdout.lower())
+                    missing_key = subprocess.run(
+                        [sys.executable, *invocation, "meetings", "organize", "--days", "90", "--json"],
+                        cwd=cwd, env=env, capture_output=True, text=True, timeout=15,
+                    )
+                    self.assertEqual(missing_key.returncode, 2, missing_key.stderr)
+                    self.assertIn("LYNSE_API_KEY is not configured", missing_key.stderr)
+                    self.assertIn("auth login", missing_key.stderr)
+                    self.assertFalse((config_home / ".lynse").exists())
+                    self.assertFalse((skill_root / ".token_cache").exists())
 
     def test_allowlist_excludes_credentials_and_duplicate_installations(self):
         with tempfile.TemporaryDirectory() as tmpdir:

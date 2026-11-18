@@ -67,7 +67,11 @@ class EmbeddingContractTests(unittest.TestCase):
             ):
                 api = lynse.LynseAPI(api_host="https://api.lynse.cn")
             headers = api._build_auth_headers("a.b.c")
-        self.assertNotIn("X-API-Key", headers)
+            self.assertNotIn("X-API-Key", headers)
+            with patch.object(api, "_refresh_token") as refresh:
+                with self.assertRaisesRegex(lynse.LynseAPIError, "Token expired"):
+                    api._get_token(refresh=True)
+                refresh.assert_not_called()
 
     def test_todo_write_contracts(self):
         api = self.make_api()
@@ -123,7 +127,7 @@ class EmbeddingContractTests(unittest.TestCase):
         )
         self.assertFalse(calls[1][2]["_retry_safe"])
 
-    def test_delete_folders_allows_server_count_zero(self):
+    def test_check_folders_reports_zero_counts_without_a_write(self):
         api = self.make_api()
         api.list_folders = lambda: {
             "code": 200,
@@ -138,18 +142,14 @@ class EmbeddingContractTests(unittest.TestCase):
                 ]
             },
         }
-        calls = []
-        api._request = lambda method, path, **kwargs: calls.append(
-            (method, path, kwargs)
-        ) or {"code": 200}
+        result = api.delete_folders(["folder-1", "folder-2"], check_only=True)
+        self.assertEqual(result["mode"], "check")
+        self.assertEqual(result["data"], {"folderIds": ["folder-1", "folder-2"], "empty": True})
 
-        api.delete_folders(["folder-1", "folder-2"])
-
-        self.assertEqual(calls[0][0], "DELETE")
-        self.assertEqual(
-            calls[0][2]["params"],
-            {"folderIds": "folder-1,folder-2"},
-        )
+    def test_destructive_folder_deletion_requires_atomic_server_support(self):
+        api = self.make_api()
+        with self.assertRaisesRegex(lynse.LynseAPIError, "atomic empty-folder operation"):
+            api.delete_folders(["folder-1"])
 
     def test_delete_folders_rejects_batch_when_any_folder_is_nonempty(self):
         api = self.make_api()
@@ -171,7 +171,7 @@ class EmbeddingContractTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(lynse.LynseAPIError, "not zero"):
-            api.delete_folders(["folder-1", "folder-2"])
+            api.delete_folders(["folder-1", "folder-2"], check_only=True)
 
     def test_delete_folders_rejects_unknown_folder(self):
         api = self.make_api()
@@ -184,7 +184,7 @@ class EmbeddingContractTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(lynse.LynseAPIError, "unknown folders"):
-            api.delete_folders(["missing-folder"])
+            api.delete_folders(["missing-folder"], check_only=True)
 
     def test_delete_folders_rejects_invalid_server_count(self):
         api = self.make_api()
@@ -202,7 +202,7 @@ class EmbeddingContractTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(lynse.LynseAPIError, "invalid server counts"):
-            api.delete_folders(["folder-1"])
+            api.delete_folders(["folder-1"], check_only=True)
 
     def test_delete_folders_double_checks_uncounted_folder_inventory(self):
         api = self.make_api()
@@ -219,14 +219,8 @@ class EmbeddingContractTests(unittest.TestCase):
                 {"id": "file-2", "folderId": ""},
             ],
         }
-        calls = []
-        api._request = lambda method, path, **kwargs: calls.append(
-            (method, path, kwargs)
-        ) or {"code": 200}
-
-        api.delete_folders(["folder-1"])
-
-        self.assertEqual(calls[0][0], "DELETE")
+        result = api.delete_folders(["folder-1"], check_only=True)
+        self.assertTrue(result["data"]["empty"])
 
     def test_delete_folders_rejects_uncounted_folder_with_matching_file(self):
         api = self.make_api()
@@ -245,7 +239,34 @@ class EmbeddingContractTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(lynse.LynseAPIError, "non-empty"):
-            api.delete_folders(["folder-1"])
+            api.delete_folders(["folder-1"], check_only=True)
+
+    def test_strict_pagination_rejects_invalid_or_conflicting_totals(self):
+        api = self.make_api()
+        rows = [{"id": "fixture"}]
+        for total in (False, -1, 1.5, "unknown"):
+            with self.subTest(total=total), patch.object(
+                api, "page_files", return_value={"data": {"records": rows, "total": total}}
+            ):
+                with self.assertRaisesRegex(lynse.LynseAPIError, "invalid total"):
+                    api.list_files_paged(strict=True)
+        with patch.object(api, "page_files", side_effect=[
+            {"data": rows, "total": 2},
+            {"data": [{"id": "next"}], "total": 3},
+        ]):
+            with self.assertRaisesRegex(lynse.LynseAPIError, "total changed"):
+                api.list_files_paged(strict=True)
+
+    def test_strict_pagination_checks_additional_pages_when_total_is_missing(self):
+        api = self.make_api()
+        with patch.object(api, "page_files", side_effect=[
+            {"data": [{"id": "first"}]},
+            {"data": [{"id": "second"}]},
+            {"data": []},
+        ]) as read:
+            result = api.list_files_paged(page_size=100, strict=True)
+        self.assertEqual(read.call_count, 3)
+        self.assertEqual(result["total"], 2)
 
     def test_device_info_uses_current_users_bound_device_list(self):
         api = self.make_api()

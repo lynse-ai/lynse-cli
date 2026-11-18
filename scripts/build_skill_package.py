@@ -92,11 +92,12 @@ def skillhub_skill_md() -> bytes:
 
 
 def workbuddy_skill_md() -> bytes:
-    """Return SKILL.md with WorkBuddy-required fields promoted to the top level.
+    """Return SKILL.md with WorkBuddy-required fields and resource references.
 
     WorkBuddy rejects packages whose frontmatter lacks version / display_name /
-    display_name_en / description_zh / description_en as top-level keys; the
-    default (Codex) variant must NOT carry them, so they are injected at pack time.
+    display_name_en / description_zh / description_en / author as top-level keys;
+    the default (Codex) variant must NOT carry them, so they are injected at pack
+    time. WorkBuddy also discovers reference docs through @references/... lines.
     """
     text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
     if not text.startswith("---\n"):
@@ -109,6 +110,12 @@ def workbuddy_skill_md() -> bytes:
             raise SystemExit(f"SKILL.md metadata is missing {metadata_field}")
         promoted.append(f"{field}: {match.group(1).strip()}")
 
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    author = package.get("author")
+    if not author:
+        raise SystemExit("package.json is missing author")
+    promoted.append(f"author: {json.dumps(author, ensure_ascii=False)}")
+
     first_line_end = text.find("\n", len("---\n"))
     if first_line_end == -1:
         raise SystemExit("SKILL.md frontmatter is incomplete")
@@ -117,6 +124,12 @@ def workbuddy_skill_md() -> bytes:
         + "\n".join(promoted)
         + "\n"
         + text[first_line_end + 1 :]
+    )
+    references = sorted(path for path in REQUIRED_FILES if path.parent == Path("references"))
+    transformed += (
+        "\n## WorkBuddy references\n\n"
+        + "\n".join(f"@{path.as_posix()}" for path in references)
+        + "\n"
     )
     return transformed.encode("utf-8")
 

@@ -70,6 +70,14 @@ class TokenRefreshTests(unittest.TestCase):
         self.assertEqual(m_post.call_count, 1)
 
     @mock.patch("lynse.requests.post")
+    def test_token_exchange_stops_at_redirect(self, m_post):
+        m_post.return_value = FakeResponse(302)
+        with self.assertRaisesRegex(LynseAPIError, "returned a redirect"):
+            self.api._refresh_token()
+        m_post.assert_called_once()
+        self.assertFalse(m_post.call_args.kwargs["allow_redirects"])
+
+    @mock.patch("lynse.requests.post")
     def test_persistent_503_reports_transient_not_bad_key(self, m_post):
         m_post.return_value = FakeResponse(503)
         with self.assertRaises(LynseAPIError) as cm:
