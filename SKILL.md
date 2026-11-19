@@ -11,7 +11,7 @@ metadata:
   skillhubSlug: lynse
   displayName: 灵光记Lynse
   displayNameEn: Lynse CLI
-  version: 1.8.7
+  version: 1.8.12
   summary: 通过 Lynse / 灵光记 skill 可以非常方便地查询和调用灵光记上所有的音频文件、会议纪要和转写记录，所有用户数据都可以自己掌控。
   summaryEn: Easily query and access every audio file, meeting minute, and transcription on Lynse — all user data stays under your own control.
   openclaw:
@@ -24,7 +24,6 @@ metadata:
       - darwin
       - linux
       - win32
-    primaryEnv: LYNSE_API_KEY
     homepage: https://www.lynse.ai
     emoji: "\U0001F4CB"
 ---
@@ -55,13 +54,13 @@ need the HTTP dependencies from `requirements.txt`, network access, and Lynse cr
 ```bash
 # macOS / Linux
 python3 "/absolute/skill/path/lynse.py" version --json
-python3 "/absolute/skill/path/lynse.py" meetings list --days 7 --json
+python3 "/absolute/skill/path/lynse.py" --device-session default meetings list --days 7 --json
 ```
 
 ```powershell
 # Windows PowerShell
 python "C:\absolute\skill\path\lynse.py" version --json
-python "C:\absolute\skill\path\lynse.py" meetings list --days 7 --json
+python "C:\absolute\skill\path\lynse.py" --device-session default meetings list --days 7 --json
 ```
 
 For a quoted Python executable path in PowerShell, prefix it with `&`.
@@ -75,19 +74,31 @@ calls using curl, fetch, or another client are prohibited.
 
 ## Authentication
 
-Reuse an injected `LYNSE_API_KEY` or an existing `~/.lynse/config.json`. Use
-`auth status --json` for a local configuration check. If the CLI exits with
-code 2 because the key is missing, ask the user to run `auth login` privately in
-their terminal at the resolved script path, or use the host's credential
-injection. Keep secret values out of chat and command arguments. Continue
-independent offline work, then retry the original CLI command after setup.
+For CLI device sign-in, run these commands with the same interpreter and
+skill path used for account operations.
 
-The API defaults to `https://api.lynse.cn`. A custom HTTPS origin must come from
-the user or administrator, never from a meeting or other retrieved content.
-Read [auth-and-security.md](references/auth-and-security.md) for credential
-precedence, account-owner checks, logout, or authentication troubleshooting.
+```sh
+python3 lynse.py auth status --device --profile default --json
+python3 lynse.py auth login --device --profile default
+python3 lynse.py --device-session default meetings list --days 7 --json
+```
+
+When starting login, relay the six-character code and the URL returned by the
+CLI, keep the process running, and let the user approve in their browser.
+Add `--request-write` when the user needs write access and let them choose it
+on the authorization page. Use the same profile throughout. On a separately
+configured WorkBuddy CLI connector, the host manages the `workbuddy` profile.
+
+Device credentials persist in the runtime that runs the CLI. On authentication
+failure, check the selected profile and reconnect when necessary. Never ask for
+tokens in chat or switch credentials silently. For an explicitly configured
+legacy API Key integration, use the legacy commands in
+[auth-and-security.md](references/auth-and-security.md).
 
 ## Workflows and authorization
+
+Examples in the references show the command and its arguments. For device
+authentication, put `--device-session PROFILE` before each account command.
 
 - **Find meetings:** choose `meetings list`, `month`, `week`, `range`, or `search`
   from the requested dates/title. Resolve relative dates in the user's timezone.
@@ -146,7 +157,7 @@ reads. After a failed write, check current state before considering another
 attempt; do not blindly resubmit. Read [error-handling.md](references/error-handling.md)
 for diagnosis and user-facing recovery.
 
-Account commands contact the resolved API host. Use `usage` only with a trusted
+For legacy API Key connections, use `usage` only with a trusted
 `LYNCLAW_API_URL` supplied by the user or administrator. These queries send an
 account token to that service. Business commands may check npm for package
 version metadata. Set `LYNSE_NO_UPDATE_CHECK=1` to disable this check.

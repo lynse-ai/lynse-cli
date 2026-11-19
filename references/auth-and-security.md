@@ -4,6 +4,26 @@ Use the bundled `lynse.py` for every Lynse operation, including login, diagnosti
 and recovery from errors. Keep direct HTTP calls out of this workflow. The CLI
 exchanges the key for a temporary token and handles token renewal.
 
+## Device authorization
+
+Use the same Python entrypoint and profile for authorization and account commands.
+
+```sh
+python3 lynse.py auth login --device --profile default
+python3 lynse.py auth status --device --profile default --json
+python3 lynse.py --device-session default meetings list --days 7 --json
+python3 lynse.py auth logout --device --profile default --json
+```
+
+The browser flow requires the user to enter the device code and approve.
+The login process polls until approval or expiration. Add `--request-write`
+to login to offer optional write access. The CLI renews its own access token
+while the connection is renewable. A rejected or expired Lynse account session
+requires renewed browser authorization. Logout revokes the selected connection.
+The auth status checks the selected persistent device session through the gateway.
+
+## Legacy API Key connections
+
 ## Check and configure credentials
 
 Run these commands with the selected Python interpreter and the quoted path to

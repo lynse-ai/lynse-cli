@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.8.12 (2026-11-18)
+
+- Route device sessions through the Lynse authorization gateway for business requests. Reconnect to bind a website account session.
+
+## 1.8.11 (2026-11-18)
+
+- Let device login offer optional write access with the user's explicit consent. WorkBuddy presents this choice when connecting.
+
+## 1.8.10 (2026-11-18)
+
+- Request a six-character device code and open the Lynse account confirmation page before entering it.
+
+## 1.8.9 (2026-11-18)
+
+- Display the device code separately from the authorization URL so users can enter it before signing in. Configure WorkBuddy to extract both values from the CLI output.
+
+## 1.8.8 (2026-11-18)
+
+- Add browser-based device login, read-only connection status, and remote disconnect for named Agent profiles.
+- Add a WorkBuddy CLI Connector bundle with a versioned Python install and a read-only Lynse Skill.
+
 ## 1.8.7 (2026-11-18)
 
 ### Security

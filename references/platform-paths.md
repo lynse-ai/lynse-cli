@@ -37,8 +37,8 @@ skill together: Codex does not merge skills with duplicate names.
 
 The plugin packages instructions and code, not Python, dependencies, or account
 credentials. Installing it does not sign into Lynse. It requires a local Codex
-execution environment with Python, network access, and the configured Lynse key;
-a remote/cloud environment must have its own runtime and credentials.
+execution environment with Python, HTTPS access to Lynse, and a device session;
+a remote/cloud environment must authorize in its own runtime.
 
 ## Python setup
 
@@ -61,32 +61,24 @@ $env:LYNSE_NO_UPDATE_CHECK = "1"
 ```
 
 Use the selected virtual-environment interpreter for subsequent commands.
-The user's own terminal can run `auth login` at that script path to enter the key
-privately. Credentials are saved outside the plugin in `~/.lynse/config.json`;
-transient tokens use `~/.lynse/tokens.json`. A restart or refreshed cache preserves
-those user files. An injected environment can supply `LYNSE_API_KEY` instead.
-Do not copy secrets into the plugin or its ZIP.
+The user can run `auth login --device --profile default` in the CLI runtime.
+Use the same profile in `--device-session default` for account commands.
+A session is saved in the execution environment's user directory, outside the
+skill folder. The CLI binary and Skill can be copied independently of the session.
 
 ## Other assistant environments
 
-| Environment | Typical standalone directory | Credentials |
-|-------------|------------------------------|-------------|
-| Claude Code | `~/.claude/skills/lynse-cli/` | User config or process environment |
-| Cursor | `~/.cursor/skills/lynse-cli/` | User config or process environment |
-| Hermes | `~/.hermes/skills/lynse-cli/` | User config or process environment |
-| OpenClaw | `~/.openclaw/workspace/skills/lynse-cli/` | Platform-injected environment or user config |
+- **Claude Code:** place the complete `lynse-cli` directory under
+  `.claude/skills/` in the project or `~/.claude/skills/` for that user.
+  [Claude Code Skills](https://code.claude.com/docs/en/skills)
+- **Muse Code:** install the extracted directory with
+  `muse skills install ./skills/lynse-cli --scope user`.
+  [Muse Code Skills](https://dev.meta.ai/docs/muse-code/extending)
+- **WorkBuddy:** use the dedicated CLI + Skill connector ZIP for managed
+  installation and browser authorization.
+  [WorkBuddy connector](https://open.workbuddy.cn/docs/connector)
+- **Other agents:** install the directory in the host's skill location, or
+  invoke the CLI through its shell tool with Python and HTTPS access.
 
-The CLI also supports a legacy `.env` beside its script at lowest precedence.
-A project `.env` in the current working directory is not automatically loaded,
-and Codex does not inject credentials from OpenClaw's `primaryEnv` metadata.
-See [auth-and-security.md](auth-and-security.md) for resolution and host trust.
-
-Sources: [Codex skill discovery](https://learn.chatgpt.com/docs/build-skills) and
-[OpenAI plugin packaging](https://developers.openai.com/plugins/build/plugins).
-
-OpenClaw accepts `python3`, `python`, or `py` through `requires.anyBins`; the
-skill still verifies Python 3.11+ at runtime. `primaryEnv` supports platform key
-injection, while no required-env discovery gate blocks saved-config login.
-OpenClaw host env injection does not automatically reach sandbox containers;
-configure runtime credentials in the actual execution environment when sandboxed.
-See the [OpenClaw skill format](https://docs.openclaw.ai/tools/skills).
+Use [auth-and-security.md](auth-and-security.md) when an administrator has
+explicitly configured a legacy API Key.

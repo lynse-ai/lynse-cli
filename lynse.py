@@ -79,7 +79,7 @@ except ImportError:
 
 
 # CLI 版本
-CLI_VERSION = '1.8.7'
+CLI_VERSION = '1.8.12'
 DEFAULT_API_HOST = 'https://api.lynse.cn'
 _HELP_FLAGS = ('--help', '-h')
 _VALUE_OPTIONS = {
@@ -95,6 +95,11 @@ _MISSING_API_KEY = (
     "in the environment that runs it."
 )
 _JWT_PATTERN = re.compile(r'[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+')
+_DEVICE_API = '/platform/oauth/api/agent'
+_DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
+_DEVICE_CODE = re.compile(r'[A-Za-z0-9_-]{43}')
+_DEVICE_REFRESH = re.compile(r'[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{64}')
+_MISSING_DEVICE_SESSION = 'Agent session missing or expired. Run auth login --device to reconnect.'
 
 # Shared protocol contract: CLI and MCP adapters consume the same operation list.
 TRANSCRIPTION_OPERATIONS = {
@@ -914,6 +919,12 @@ def _parse_global_flags(args: list):
     while i < len(args):
         if args[i] == '--json':
             flags['format'] = 'json'; flags['format_explicit'] = True; i += 1
+        elif args[i] == '--device-session':
+            if i + 1 >= len(args):
+                print('Error: --device-session requires a profile name.', file=sys.stderr)
+                sys.exit(EXIT_INVALID)
+            flags['device_session'] = args[i + 1]
+            i += 2
         elif args[i] == '--pretty':
             flags['format'] = 'pretty'; flags['format_explicit'] = True; i += 1
         elif args[i] == '--text':
@@ -3624,6 +3635,224 @@ class LynseAPI:
         return self._request('GET', '/api/business/sysMenu/tree')
 
 
+def _device_path(profile: str) -> Path:
+    if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,31}', profile):
+        raise LynseAPIError('Invalid device profile name.')
+    return _get_user_config_dir() / 'agent-auth' / (profile + '.json')
+
+
+def _load_device_session(path: Path):
+    if path.is_symlink():
+        return None
+    try:
+        with path.open(encoding='utf-8') as stream:
+            payload = json.loads(stream.read(8192))
+        if (not isinstance(payload, dict) or type(payload.get('access_expires_at')) is not int
+                or not _DEVICE_CODE.fullmatch(payload.get('access_token', ''))
+                or not _DEVICE_REFRESH.fullmatch(payload.get('refresh_token', ''))
+                or not _DEVICE_CODE.fullmatch(payload.get('session_id', ''))
+                or payload.get('client_id') != 'lynse-cli'):
+            return None
+        for name in ('gateway', 'resource'):
+            if _validate_api_host(payload[name]) != payload[name]:
+                return None
+        return payload
+    except (KeyError, OSError, TypeError, ValueError, LynseAPIError):
+        return None
+
+
+@contextmanager
+def _device_session_lock(path: Path):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path.with_suffix('.lock'), os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    try:
+        if os.name == 'nt':
+            import msvcrt
+
+            def lock():
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            def lock():
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        deadline = time.monotonic() + 7
+        while True:
+            try:
+                lock()
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise LynseAPIError('Another CLI process is using this device session. Retry shortly.')
+                time.sleep(0.1)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _device_request(gateway: str, operation: str, data: dict | None = None) -> dict:
+    _, ready = _http_dependencies()
+    if not ready:
+        raise LynseAPIError('Install the supported HTTP dependencies from the bundled requirements.txt.')
+    url = gateway + _DEVICE_API + '/' + operation
+    try:
+        if data is None:
+            response = requests.get(url, timeout=(3, 4), allow_redirects=False)
+        else:
+            response = requests.post(url, data=data, timeout=(3, 4), allow_redirects=False)
+        if response.status_code == 200 and operation == 'revoke':
+            return {}
+        if response.status_code not in (200, 400):
+            raise LynseAPIError('The device authorization service is unavailable.', http_code=response.status_code)
+        payload = response.json()
+        if not isinstance(payload, dict) or (response.status_code == 400 and not isinstance(payload.get('error'), str)):
+            raise ValueError('Invalid device response')
+        return payload
+    except requests.RequestException as error:
+        raise _transport_error(error, 'the device authorization request') from None
+    except ValueError:
+        raise LynseAPIError('Invalid response from the device authorization service.') from None
+
+
+def _device_response_tokens(payload, session):
+    access, refresh, lifetime = payload.get('access_token'), payload.get('refresh_token'), payload.get('expires_in')
+    if (not isinstance(access, str) or not _DEVICE_CODE.fullmatch(access)
+            or not isinstance(refresh, str) or not _DEVICE_REFRESH.fullmatch(refresh)
+            or type(lifetime) is not int or not 0 < lifetime <= 900):
+        raise LynseAPIError(_MISSING_DEVICE_SESSION, http_code=401)
+    return session | {'access_token': access, 'refresh_token': refresh, 'access_expires_at': int(time.time()) + lifetime}
+
+
+def _device_is_active(session) -> bool:
+    if not session:
+        return False
+    state = _device_request(session['gateway'], 'session', {
+        'client_id': session['client_id'], 'resource': session['resource'], 'refresh_token': session['refresh_token'], 'business_proxy': '1',
+    })
+    return state.get('active') is True and type(state.get('expires_at')) is int and state['expires_at'] > time.time()
+
+
+def _device_login(path: Path, *, request_write: bool = False):
+    import secrets
+
+    gateway = _validate_api_host(os.environ.get('LYNSE_AGENT_AUTH_ORIGIN') or 'https://mcp.lynse.cn')
+    web = _validate_api_host(os.environ.get('LYNSE_AGENT_WEB_ORIGIN') or 'https://www.lynse.cn')
+    with _device_session_lock(path):
+        if _device_is_active(_load_device_session(path)):
+            return
+        fields = {'client_id': 'lynse-cli', 'scope': 'lynse:read', 'user_code_length': '6', 'business_proxy': '1'}
+        if request_write:
+            fields.update(scope='lynse:read lynse:write', write_optional='1')
+        flow = _device_request(gateway, 'device-code', fields)
+        if flow.get('business_proxy') is not True:
+            raise LynseAPIError('The gateway does not support CLI business sessions.')
+        resource = _validate_api_host(flow.get('resource', ''))
+        client = {'client_id': 'lynse-cli', 'resource': resource}
+        code, url = flow.get('device_code'), flow.get('verification_uri')
+        user_code = flow.get('user_code')
+        interval, lifetime = flow.get('interval'), flow.get('expires_in')
+        if (not isinstance(code, str) or not _DEVICE_CODE.fullmatch(code) or not isinstance(url, str)
+                or not isinstance(user_code, str) or not re.fullmatch(r'[A-Z0-9]{3}-[A-Z0-9]{3}', user_code)
+                or not re.fullmatch(re.escape(web) + r'/(?:[A-Za-z0-9_-]+/)*login/device', url)
+                or type(interval) is not int or not 1 <= interval <= 30
+                or type(lifetime) is not int or not interval < lifetime <= 600):
+            raise LynseAPIError('Invalid device authorization link.')
+        print(f'Device code: {user_code}\n{url}', flush=True)
+        deadline = time.monotonic() + lifetime
+        while time.monotonic() + interval < deadline:
+            time.sleep(interval)
+            payload = _device_request(gateway, 'token', client | {'grant_type': _DEVICE_GRANT, 'device_code': code})
+            error = payload.get('error')
+            if error == 'authorization_pending':
+                continue
+            if error == 'slow_down':
+                interval += 5
+                continue
+            if error:
+                raise LynseAPIError('Device authorization was denied or expired. Reconnect to try again.', http_code=401)
+            session = client | {'gateway': gateway, 'session_id': secrets.token_urlsafe(32), 'business_proxy': True}
+            _write_private_json(path, _device_response_tokens(payload, session))
+            return
+    raise LynseAPIError('Device authorization expired. Reconnect to try again.', http_code=401)
+
+
+def _handle_device_auth(command, args, flags):
+    request_write = '--request-write' in args
+    if request_write:
+        if command != '__auth_login__' or args.count('--request-write') != 1:
+            raise LynseAPIError('Use --request-write once with auth login --device.')
+        args = [arg for arg in args if arg != '--request-write']
+    if len(args) == 1:
+        profile = 'default'
+    elif len(args) == 3 and args[1] == '--profile':
+        profile = args[2]
+    else:
+        raise LynseAPIError('Use --device with an optional --profile NAME.')
+    path = _device_path(profile)
+    if command == '__auth_status__':
+        active = _device_is_active(_load_device_session(path))
+        _format_output({'authenticated': active}, 'device_status', flags)
+        if not active:
+            sys.exit(EXIT_AUTH)
+    elif command == '__auth_login__':
+        _device_login(path, request_write=request_write)
+        print('Lynse connected.', file=sys.stderr)
+    elif command == '__auth_logout__':
+        if path.exists():
+            with _device_session_lock(path):
+                session = _load_device_session(path)
+                if session:
+                    result = _device_request(session['gateway'], 'revoke', {
+                        'client_id': session['client_id'], 'token': session['refresh_token'],
+                    })
+                    if result.get('error'):
+                        raise LynseAPIError('Lynse could not revoke the connection. Retry disconnecting.')
+                path.unlink(missing_ok=True)
+        _format_output({'authenticated': False}, 'device_logout', flags)
+    else:
+        raise LynseAPIError('Device authentication supports login, status, and logout.')
+
+
+class DeviceLynseAPI(LynseAPI):
+    def __init__(self, profile):
+        self.device_path = _device_path(profile)
+        session = _load_device_session(self.device_path)
+        if session is None or session.get('business_proxy') is not True:
+            raise LynseAPIError(_MISSING_DEVICE_SESSION, http_code=401)
+        self.device_id = session['session_id']
+        self.resource = session['resource']
+        super().__init__(api_host=session['gateway'], access_token=session['access_token'])
+
+    def _request(self, method, path, *args, **kwargs):
+        prefix = _DEVICE_API + '/business'
+        if not path.startswith(prefix + '/'):
+            path = prefix + path
+        return super()._request(method, path, *args, **kwargs)
+
+    def _get_token(self, refresh=False):
+        session = _load_device_session(self.device_path)
+        if not session or session['session_id'] != self.device_id or session['resource'] != self.resource or session['gateway'] != self.api_host:
+            raise LynseAPIError(_MISSING_DEVICE_SESSION, http_code=401)
+        if not refresh and session['access_expires_at'] > time.time() + 15:
+            return session['access_token']
+        with _device_session_lock(self.device_path):
+            session = _load_device_session(self.device_path)
+            if not session or session['session_id'] != self.device_id or session['resource'] != self.resource or session['gateway'] != self.api_host:
+                raise LynseAPIError(_MISSING_DEVICE_SESSION, http_code=401)
+            if refresh or session['access_expires_at'] <= time.time() + 15:
+                result = _device_request(session['gateway'], 'token', {
+                    'client_id': session['client_id'], 'resource': session['resource'],
+                    'grant_type': 'refresh_token', 'refresh_token': session['refresh_token'],
+                })
+                session = _device_response_tokens(result, session)
+                _write_private_json(self.device_path, session)
+            return session['access_token']
+
+    def _build_auth_headers_with_mode(self, token, *, use_bearer, extra=None):
+        return super()._build_auth_headers_with_mode(token, use_bearer=True, extra=extra)
+
+
 def _print_help(path: list[str]):
     """Print general, command-group, or subcommand help without an API client."""
     subject = ''
@@ -3691,8 +3920,11 @@ def _print_help(path: list[str]):
         ]),
         ("Auth", [
             ("auth login [--host <url>]", "Prompt securely for API key and validate"),
+            ("auth login --device [--profile NAME] [--request-write]", "Sign in and optionally offer write access"),
             ("auth status", "Show auth configuration"),
+            ("auth status --device [--profile NAME]", "Check whether the device session can still be renewed"),
             ("auth logout [--tokens-only]", "Remove local credentials (or only clear the token cache)"),
+            ("auth logout --device [--profile NAME]", "Revoke and remove the selected device session"),
             ("auth doctor", "Diagnose auth issues"),
         ]),
         ("System", [
@@ -3742,6 +3974,9 @@ def _print_help(path: list[str]):
 
 def _handle_auth_command(subcommand: str, args: list, flags: dict):
     """处理 auth 子命令。"""
+    if args[:1] == ['--device']:
+        _handle_device_auth(subcommand, args, flags)
+        return
     if subcommand == '__auth_login__':
         api_key, api_host = None, None
         i = 0
@@ -4024,7 +4259,10 @@ def main():
             return
 
         # 6. 初始化 API 并执行业务命令
-        api = LynseAPI()
+        profile = flags.get('device_session')
+        if profile and command.startswith('usage'):
+            raise LynseAPIError('Device sessions are scoped to the Lynse business API.')
+        api = DeviceLynseAPI(profile) if profile else LynseAPI()
         _maybe_print_update_notice()
 
         if command == 'autoTranscribe':
